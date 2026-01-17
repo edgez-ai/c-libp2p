@@ -345,7 +345,7 @@ set(_saved_BUILD_SHARED_LIBS "${BUILD_SHARED_LIBS}")
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build using shared libraries" FORCE)
 _add_subdirectory_no_tests(external/libtommath)
 set(BUILD_SHARED_LIBS "${_saved_BUILD_SHARED_LIBS}" CACHE BOOL "Build using shared libraries" FORCE)
-set(libtommath_DIR "${CMAKE_BINARY_DIR}/external/libtommath")
+set(libtommath_DIR "${CMAKE_BINARY_DIR}/external/libtommath" CACHE PATH "Path to libtommath build directory" FORCE)
 
 # Workarounds for libtommath build under our global -O0/-g settings.
 if(TARGET libtommath)
