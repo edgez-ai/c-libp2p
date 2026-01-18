@@ -147,6 +147,19 @@ static void cbctx_stream_cleanup(void *ctx, libp2p_stream_t *s)
     cbctx_remove_stream(c, s);
 }
 
+static void cbctx_register_stream(yamux_cb_ctx_t *c, libp2p_stream_t *s)
+{
+    if (!c || !s)
+        return;
+    push_stream_node_t *node = (push_stream_node_t *)calloc(1, sizeof(*node));
+    if (!node)
+        return;
+    node->s = s;
+    node->next = c->streams;
+    c->streams = node;
+    libp2p__stream_set_cleanup(s, cbctx_stream_cleanup, c);
+}
+
 static void cbctx_service_push(yamux_cb_ctx_t *c)
 {
     if (!c)
@@ -282,6 +295,171 @@ static int collect_supported_protocols(libp2p_host_t *host, const char ***out_id
 
 /* Removed old push pump scaffolding (unused). Readability delivery is handled
  * via cbctx_service_push and push_bridge_on_readable without dedicated pumps. */
+
+/* Bridge readable notifications directly to a protocol's on_data handler for
+ * push-mode streams. This complements the periodic cbctx_service_push pump to
+ * ensure timely delivery without polling. */
+typedef struct push_bridge_ctx
+{
+    libp2p_protocol_def_t def;
+    yamux_cb_ctx_t *c;
+} push_bridge_ctx_t;
+
+static void push_bridge_on_readable(libp2p_stream_t *s, void *ud)
+{
+    push_bridge_ctx_t *ctx = (push_bridge_ctx_t *)ud;
+    if (!ctx || !s || !ctx->def.on_data)
+        return;
+    uint8_t *buf = NULL;
+    size_t buf_sz = 0;
+
+    if (!ctx->c)
+        return;
+
+    pthread_mutex_lock(&ctx->c->mtx);
+    push_stream_node_t *node = NULL;
+    for (push_stream_node_t *it = ctx->c->streams; it; it = it->next)
+    {
+        if (it->s == s)
+        {
+            node = it;
+            break;
+        }
+    }
+
+    if (!node)
+    {
+        pthread_mutex_unlock(&ctx->c->mtx);
+        libp2p_stream_on_readable(s, push_bridge_on_readable, ctx);
+        return;
+    }
+
+    size_t want = node->buf_sz > 0 ? node->buf_sz : 4096;
+    if (node->cap > 0 && node->cap < want)
+        want = node->cap;
+    if (want == 0)
+        want = 1;
+    if (!node->buf || node->buf_sz < want)
+    {
+        uint8_t *nb = (uint8_t *)realloc(node->buf, want);
+        if (nb)
+        {
+            node->buf = nb;
+            node->buf_sz = want;
+        }
+        else
+        {
+            pthread_mutex_unlock(&ctx->c->mtx);
+            libp2p_stream_on_readable(s, push_bridge_on_readable, ctx);
+            return;
+        }
+    }
+
+    buf = node->buf;
+    buf_sz = node->buf_sz;
+
+    for (;;)
+    {
+        ssize_t n = libp2p_stream_read(s, buf, buf_sz);
+        if (n > 0)
+        {
+            ctx->def.on_data(s, buf, (size_t)n, ctx->def.user_data);
+            continue;
+        }
+        if (n == 0)
+        {
+            if (ctx->def.on_eof)
+                ctx->def.on_eof(s, ctx->def.user_data);
+            pthread_mutex_unlock(&ctx->c->mtx);
+            free(ctx);
+            return;
+        }
+        if (n == LIBP2P_ERR_AGAIN)
+        {
+            pthread_mutex_unlock(&ctx->c->mtx);
+            libp2p_stream_on_readable(s, push_bridge_on_readable, ctx);
+            return;
+        }
+        if (ctx->def.on_error)
+            ctx->def.on_error(s, (int)n, ctx->def.user_data);
+        pthread_mutex_unlock(&ctx->c->mtx);
+        free(ctx);
+        return;
+    }
+}
+
+/* Detach the listener list under the host mutex and optionally duplicate it into
+ * an array for indexed processing. Falls back to list processing when memory
+ * allocation fails, avoiding null-pointer dereferences during shutdown. */
+static void detach_listeners(libp2p_host_t *host, listener_node_t ***out_arr, size_t *out_len, listener_node_t **out_head)
+{
+    if (!host || !out_arr || !out_len || !out_head)
+        return;
+    *out_arr = NULL;
+    *out_len = 0;
+    *out_head = NULL;
+
+    pthread_mutex_lock(&host->mtx);
+    listener_node_t *head = host->listeners;
+    size_t count = 0;
+    for (listener_node_t *it = head; it; it = it->next)
+        count++;
+
+    listener_node_t **arr = NULL;
+    if (count > 0)
+    {
+        arr = (listener_node_t **)calloc(count, sizeof(*arr));
+        if (arr)
+        {
+            size_t idx = 0;
+            for (listener_node_t *it = head; it && idx < count; it = it->next)
+                arr[idx++] = it;
+            count = idx;
+        }
+    }
+
+    host->listeners = NULL;
+    pthread_mutex_unlock(&host->mtx);
+
+    *out_arr = arr;
+    *out_len = count;
+    *out_head = head;
+}
+
+static int ptr_list_contains(void *const *arr, size_t count, const void *ptr)
+{
+    if (!arr || !ptr || count == 0)
+        return 0;
+    for (size_t i = 0; i < count; i++)
+        if (arr[i] == ptr)
+            return 1;
+    return 0;
+}
+
+/* Free per-session yamux callback context and any retained tracking nodes. */
+static void yamux_cb_ctx_free(yamux_cb_ctx_t *c)
+{
+    if (!c)
+        return;
+    pthread_mutex_lock(&c->mtx);
+    struct push_stream_node *it = c->streams;
+    c->streams = NULL;
+    pthread_mutex_unlock(&c->mtx);
+    while (it)
+    {
+        struct push_stream_node *next = it->next;
+        if (it->buf)
+            free(it->buf);
+        free(it);
+        it = next;
+    }
+    if (c->first_peer)
+        peer_id_destroy(c->first_peer);
+    if (c->peer_template.bytes)
+        peer_id_destroy(&c->peer_template);
+    pthread_mutex_destroy(&c->mtx);
+    free(c);
+}
 
 /* Inbound yamux session handler: processes frames and accepts true substreams */
 typedef struct inbound_session_ctx
