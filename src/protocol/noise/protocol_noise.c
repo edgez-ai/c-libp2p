@@ -76,8 +76,19 @@ static int build_handshake_payload(struct libp2p_noise_ctx *ctx, uint8_t **out, 
 
     if (ctx->identity_type == PEER_ID_ED25519_KEY_TYPE)
     {
+        /* Debug: print the identity key seed being used */
+        fprintf(stderr, "[NOISE DEBUG] identity_key seed (%zu bytes): ", ctx->identity_key_len);
+        for (size_t i = 0; i < ctx->identity_key_len && i < 32; i++) fprintf(stderr, "%02x", ctx->identity_key[i]);
+        fprintf(stderr, "\n");
+
         ed25519_genpub(id_pub, ctx->identity_key);
         id_pub_len = 32;
+
+        /* Debug: print the generated public key */
+        fprintf(stderr, "[NOISE DEBUG] ed25519_genpub result: ");
+        for (size_t i = 0; i < 32; i++) fprintf(stderr, "%02x", id_pub[i]);
+        fprintf(stderr, "\n");
+
         pbret = peer_id_build_public_key_protobuf(PEER_ID_ED25519_KEY_TYPE, id_pub, id_pub_len, &pubkey_pb, &pubkey_pb_len);
     }
     else if (ctx->identity_type == PEER_ID_SECP256K1_KEY_TYPE)
@@ -1096,6 +1107,16 @@ libp2p_security_t *libp2p_noise_security_new(const libp2p_noise_config_t *cfg)
         ctx->identity_key_len = cfg->identity_private_key_len;
         ctx->identity_type = cfg->identity_key_type;
         ctx->have_identity = 1;
+
+        /* Debug: print the identity key being stored in Noise ctx */
+        fprintf(stderr, "[NOISE] libp2p_noise_security_new: storing identity_key (%zu bytes, type=%d): ",
+                ctx->identity_key_len, ctx->identity_type);
+        for (size_t i = 0; i < ctx->identity_key_len && i < 32; i++) fprintf(stderr, "%02x", ctx->identity_key[i]);
+        fprintf(stderr, "\n");
+    }
+    else
+    {
+        fprintf(stderr, "[NOISE] libp2p_noise_security_new: NO identity key provided!\n");
     }
     if (cfg && cfg->early_data && cfg->early_data_len)
     {
