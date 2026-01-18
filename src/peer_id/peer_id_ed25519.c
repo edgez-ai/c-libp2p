@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -43,10 +44,16 @@ static void secure_zero(void *ptr, size_t len)
  */
 static void init_ltc_shared(void)
 {
-    /* Register SHA-512 hash - required by Ed25519 (uses find_hash("sha512")) */
-    register_hash(&sha512_desc);
+    int hash_before = find_hash("sha512");
+    int reg_err = register_hash(&sha512_desc);
+    int hash_after = find_hash("sha512");
+    fprintf(stderr,
+            "[PEER_ID DEBUG] ltc init: sha512 hash before=%d after=%d reg_err=%d\n",
+            hash_before, hash_after, reg_err);
     /* Set math provider to libtommath - always used in this build */
     ltc_mp = ltm_desc;
+    fprintf(stderr, "[PEER_ID DEBUG] ltc init: ltc_mp.name=%s\n",
+            ltc_mp.name ? ltc_mp.name : "(null)");
 }
 
 #if defined(HAVE_C11_THREADS)
@@ -94,6 +101,7 @@ peer_id_error_t peer_id_create_from_private_key_ed25519(const uint8_t *key_data,
     CALL_LTC_INIT();
     if (ltc_mp.name == NULL)
     {
+        fprintf(stderr, "[PEER_ID DEBUG] ltc_mp.name is NULL after init\n");
         return PEER_ID_E_CRYPTO_FAILED;
     }
 
@@ -102,6 +110,7 @@ peer_id_error_t peer_id_create_from_private_key_ed25519(const uint8_t *key_data,
     int err = ed25519_import_raw(key_data, (unsigned long)key_data_len, PK_PRIVATE, &ed_key);
     if (err != CRYPT_OK)
     {
+        fprintf(stderr, "[PEER_ID DEBUG] ed25519_import_raw failed err=%d\n", err);
         return PEER_ID_E_INVALID_PROTOBUF;
     }
 
@@ -134,6 +143,7 @@ peer_id_error_t peer_id_create_from_private_key_ed25519(const uint8_t *key_data,
 
     if (err != CRYPT_OK)
     {
+        fprintf(stderr, "[PEER_ID DEBUG] ed25519_export failed err=%d der_len=%zu\n", err, der_len);
         secure_zero(der_buf, der_len);
         free(der_buf);
         secure_zero(&ed_key, sizeof(ed_key));

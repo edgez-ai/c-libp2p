@@ -26,10 +26,16 @@
 static pthread_once_t noise_ltc_init_once = PTHREAD_ONCE_INIT;
 static void noise_init_ltc(void)
 {
-    /* Register SHA-512 hash - required by Ed25519 (uses find_hash("sha512")) */
-    register_hash(&sha512_desc);
+    int hash_before = find_hash("sha512");
+    int reg_err = register_hash(&sha512_desc);
+    int hash_after = find_hash("sha512");
+    fprintf(stderr,
+            "[NOISE DEBUG] ltc init: sha512 hash before=%d after=%d reg_err=%d\n",
+            hash_before, hash_after, reg_err);
     /* Set math provider to libtommath */
     ltc_mp = ltm_desc;
+    fprintf(stderr, "[NOISE DEBUG] ltc init: ltc_mp.name=%s\n",
+            ltc_mp.name ? ltc_mp.name : "(null)");
 }
 #define NOISE_INIT_LTC() pthread_once(&noise_ltc_init_once, noise_init_ltc)
 
@@ -44,7 +50,10 @@ static int ltc_ed25519_seed_to_pubkey(const uint8_t seed[32], uint8_t pub[32])
     curve25519_key ed_key;
     int err = ed25519_import_raw(seed, 32, PK_PRIVATE, &ed_key);
     if (err != CRYPT_OK)
+    {
+        fprintf(stderr, "[NOISE DEBUG] ed25519_import_raw failed err=%d\n", err);
         return -1;
+    }
 
     /* Export the public key in raw format (32 bytes) - same as peer_id_ed25519.c */
     unsigned long pub_len = 32;
@@ -52,7 +61,12 @@ static int ltc_ed25519_seed_to_pubkey(const uint8_t seed[32], uint8_t pub[32])
     memset(&ed_key, 0, sizeof(ed_key));
 
     if (err != CRYPT_OK || pub_len != 32)
+    {
+        fprintf(stderr,
+                "[NOISE DEBUG] ed25519_export failed err=%d pub_len=%lu\n",
+                err, pub_len);
         return -1;
+    }
 
     return 0;
 }
