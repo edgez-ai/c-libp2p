@@ -218,6 +218,9 @@ void libp2p__enqueue_event(struct libp2p_host *host, const libp2p_event_t *evt);
 /* Select a transport capable of handling the given multiaddr, or NULL. */
 libp2p_transport_t *libp2p__host_select_transport(const struct libp2p_host *host, const multiaddr_t *addr);
 
+/* Accept an already-accepted raw inbound connection and run upgrade + session wiring. */
+int libp2p__host_accept_inbound_raw(struct libp2p_host *host, struct libp2p_connection *raw);
+
 /* No ping-specific helpers; stream accounting handled by resource manager. */
 
 /* Worker lifecycle helpers */

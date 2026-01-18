@@ -7,273 +7,7 @@
 
 #include "host_internal.h"
 #include "proto_select_internal.h"
-
-#include "libp2p/error_map.h"
-#include "libp2p/events.h"
-#include "libp2p/io.h"
-#include "libp2p/log.h"
-#include "libp2p/lpmsg.h"
-#include "libp2p/peerstore.h"
-#include "libp2p/stream.h"
-#include "libp2p/protocol_listen.h"
-#include "libp2p/runtime.h"
-#include "libp2p/stream_internal.h"
-#include "protocol/identify/protocol_identify.h"
-#include "protocol/multiselect/protocol_multiselect.h"
-#include "protocol/muxer/mplex/mplex_io_adapter.h"
-#include "protocol/muxer/mplex/mplex_stream_adapter.h"
-#include "protocol/muxer/mplex/protocol_mplex.h"
-#include "protocol/muxer/yamux/protocol_yamux.h"
-#include "protocol/muxer/yamux/yamux_io_adapter.h"
-#include "protocol/muxer/yamux/yamux_stream_adapter.h"
-#include "protocol/noise/protocol_noise.h"
-#include "protocol/quic/protocol_quic.h"
-#include "transport/transport.h"
-#include "transport/upgrader.h"
-
-/* generic readiness helpers are provided by stream internals */
-
-/* Single-thread executor task for protocol on_open */
-typedef struct proto_on_open_task
-{
-    libp2p_stream_t *s;
-    libp2p_protocol_def_t def;
-} proto_on_open_task_t;
-
-static void cbexec_proto_on_open(void *ud)
-{
-    proto_on_open_task_t *t = (proto_on_open_task_t *)ud;
-    if (t && t->def.on_open)
-        t->def.on_open(t->s, t->def.user_data);
-    if (t && t->s)
-        libp2p__stream_release_async(t->s);
-    free(t);
-}
-
-/* no watchdog – runtime stops on io error/close */
-
-/* Minimal runtime callback context for inbound yamux session */
-typedef struct yamux_cb_ctx
-{
-    libp2p_runtime_t *rt;
-    libp2p_host_t *host;
-    libp2p_yamux_ctx_t *yctx;
-    libp2p_conn_t *secured;
-    /* First stream gets this exact peer pointer; subsequent streams use peer_template */
-    peer_id_t *first_peer;   /* owned by session until claimed; protect with mtx */
-    int accepted_count;      /* number of accepted substreams on this connection */
-    peer_id_t peer_template; /* a copy to duplicate for subsequent streams */
-    /* Runtime-driven stream readiness (push-mode + on_writable) */
-    pthread_mutex_t mtx;
-    struct push_stream_node *streams; /* singly-linked */
-} yamux_cb_ctx_t;
-
-static void inbound_yamux_on_io(int _fd, short events, void *ud);
-static void *inbound_substream_worker(void *arg);
-
-/* Forward declaration for listener thread */
-static void *listener_accept_thread(void *arg);
-
-/* Per-session push-mode stream tracking */
-typedef struct push_stream_node
-{
-    libp2p_stream_t *s;
-    libp2p_protocol_def_t def; /* valid when read_mode == PUSH and on_data set */
-    size_t cap;                /* optional inflight cap */
-    uint8_t *buf;              /* reusable buffer */
-    size_t buf_sz;
-    struct push_stream_node *next;
-} push_stream_node_t;
-
-static void cbctx_stream_cleanup(void *ctx, libp2p_stream_t *s);
-
-/* Detach the listener list under the host mutex and optionally duplicate it into
- * an array for indexed processing. Falls back to list processing when memory
- * allocation fails, avoiding null-pointer dereferences during shutdown. */
-static void detach_listeners(libp2p_host_t *host, listener_node_t ***out_arr, size_t *out_len, listener_node_t **out_head)
-{
-    if (!host || !out_arr || !out_len || !out_head)
-        return;
-    *out_arr = NULL;
-    *out_len = 0;
-    *out_head = NULL;
-
-    pthread_mutex_lock(&host->mtx);
-    listener_node_t *head = host->listeners;
-    size_t count = 0;
-    for (listener_node_t *it = head; it; it = it->next)
-        count++;
-
-    listener_node_t **arr = NULL;
-    if (count > 0)
-    {
-        arr = (listener_node_t **)calloc(count, sizeof(*arr));
-        if (arr)
-        {
-            size_t idx = 0;
-            for (listener_node_t *it = head; it && idx < count; it = it->next)
-                arr[idx++] = it;
-            count = idx;
-        }
-    }
-
-    host->listeners = NULL;
-    pthread_mutex_unlock(&host->mtx);
-
-    *out_arr = arr;
-    *out_len = count;
-    *out_head = head;
-}
-
-static int ptr_list_contains(void *const *arr, size_t count, const void *ptr)
-{
-    if (!arr || !ptr || count == 0)
-        return 0;
-    for (size_t i = 0; i < count; i++)
-        if (arr[i] == ptr)
-            return 1;
-    return 0;
-}
-
-/* Free per-session yamux callback context and any retained tracking nodes. */
-static void yamux_cb_ctx_free(yamux_cb_ctx_t *c)
-{
-    if (!c)
-        return;
-    /* Detach list under lock to safely free after unlock */
-    pthread_mutex_lock(&c->mtx);
-    struct push_stream_node *it = c->streams;
-    c->streams = NULL;
-    pthread_mutex_unlock(&c->mtx);
-    while (it)
-    {
-        struct push_stream_node *next = it->next;
-        if (it->buf)
-            free(it->buf);
-        /* Do not touch it->s; streams are closed elsewhere */
-        free(it);
-        it = next;
-    }
-    if (c->first_peer)
-        peer_id_destroy(c->first_peer);
-    if (c->peer_template.bytes)
-        peer_id_destroy(&c->peer_template);
-    pthread_mutex_destroy(&c->mtx);
-    free(c);
-}
-
-/* Bridge readable notifications directly to a protocol's on_data handler for
- * push-mode streams. This complements the periodic cbctx_service_push pump to
- * ensure timely delivery without polling. */
-typedef struct push_bridge_ctx
-{
-    libp2p_protocol_def_t def;
-    yamux_cb_ctx_t *c;
-} push_bridge_ctx_t;
-
-static void push_bridge_on_readable(libp2p_stream_t *s, void *ud)
-{
-    push_bridge_ctx_t *ctx = (push_bridge_ctx_t *)ud;
-    if (!ctx || !s || !ctx->def.on_data)
-        return;
-    /* Reuse the per-stream buffer managed by push_stream_node to avoid
-     * per-callback allocations. Allocate once on the node if missing. */
-    uint8_t *buf = NULL;
-    size_t buf_sz = 0;
-
-    if (!ctx->c)
-        return;
-
-    pthread_mutex_lock(&ctx->c->mtx);
-    push_stream_node_t *node = NULL;
-    for (push_stream_node_t *it = ctx->c->streams; it; it = it->next)
-    {
-        if (it->s == s)
-        {
-            node = it;
-            break;
-        }
-    }
-
-    if (!node)
-    {
-        /* Stream not tracked (race or teardown). Re-arm and try later. */
-        pthread_mutex_unlock(&ctx->c->mtx);
-        libp2p_stream_on_readable(s, push_bridge_on_readable, ctx);
-        return;
-    }
-
-    /* Ensure buffer exists on node */
-    size_t want = node->buf_sz > 0 ? node->buf_sz : 4096;
-    if (node->cap > 0 && node->cap < want)
-        want = node->cap;
-    if (want == 0)
-        want = 1;
-    if (!node->buf || node->buf_sz < want)
-    {
-        uint8_t *nb = (uint8_t *)realloc(node->buf, want);
-        if (nb)
-        {
-            node->buf = nb;
-            node->buf_sz = want;
-        }
-        else
-        {
-            /* Allocation failed; unlock and re-arm to retry later. */
-            pthread_mutex_unlock(&ctx->c->mtx);
-            libp2p_stream_on_readable(s, push_bridge_on_readable, ctx);
-            return;
-        }
-    }
-
-    buf = node->buf;
-    buf_sz = node->buf_sz;
-
-    for (;;)
-    {
-        ssize_t n = libp2p_stream_read(s, buf, buf_sz);
-        if (n > 0)
-        {
-            ctx->def.on_data(s, buf, (size_t)n, ctx->def.user_data);
-            continue;
-        }
-        if (n == 0)
-        {
-            if (ctx->def.on_eof)
-                ctx->def.on_eof(s, ctx->def.user_data);
-            pthread_mutex_unlock(&ctx->c->mtx);
-            free(ctx);
-            return;
-        }
-        if (n == LIBP2P_ERR_AGAIN)
-        {
-            /* Re-arm for next readability */
-            pthread_mutex_unlock(&ctx->c->mtx);
-            libp2p_stream_on_readable(s, push_bridge_on_readable, ctx);
-            return;
-        }
-        /* Error */
-        if (ctx->def.on_error)
-            ctx->def.on_error(s, (int)n, ctx->def.user_data);
-        pthread_mutex_unlock(&ctx->c->mtx);
-        free(ctx);
-        return;
-    }
-}
-
-static void cbctx_register_stream(yamux_cb_ctx_t *c, libp2p_stream_t *s)
-{
-    if (!c || !s)
-        return;
-    push_stream_node_t *n = (push_stream_node_t *)calloc(1, sizeof(*n));
-    if (!n)
-        return;
-    n->s = s;
-    pthread_mutex_lock(&c->mtx);
-    n->next = c->streams;
-    c->streams = n;
-    pthread_mutex_unlock(&c->mtx);
-    libp2p__stream_set_cleanup(s, cbctx_stream_cleanup, c);
+        (void)libp2p__host_accept_inbound_raw(host, raw);
 }
 
 static void cbctx_configure_push(yamux_cb_ctx_t *c, libp2p_stream_t *s, const libp2p_protocol_def_t *def, size_t cap)
@@ -1087,6 +821,250 @@ static void *inbound_mplex_session_thread(void *arg)
     }
     free(ictx);
     return NULL;
+}
+
+int libp2p__host_accept_inbound_raw(libp2p_host_t *host, libp2p_conn_t *raw)
+{
+    if (!host || !raw)
+        return LIBP2P_ERR_NULL_PTR;
+
+    libp2p_uconn_t *uc = NULL;
+    int uprci = 0;
+    int is_quic_raw = (libp2p_quic_conn_session(raw) != NULL) ? 1 : 0;
+    LP_LOGI("HOST", "upgrading inbound connection is_quic=%d", is_quic_raw);
+    if (is_quic_raw)
+        uprci = libp2p__host_upgrade_inbound_quic(host, raw, &uc);
+    else
+        uprci = libp2p__host_upgrade_inbound(host, raw, /*allow_mplex=*/1, &uc);
+
+    LP_LOGI("HOST", "upgrade result rc=%d uc=%p", uprci, (void *)uc);
+    if (uprci != 0 || !uc)
+        return uprci != 0 ? uprci : LIBP2P_ERR_INTERNAL;
+
+    libp2p_conn_t *secured = uc->conn;
+    peer_id_t *remote_peer = uc->remote_peer;
+    libp2p_muxer_t *mx = (libp2p_muxer_t *)uc->muxer;
+    free(uc);
+
+    /* Enforce inbound connection limits and optional conn manager high-water */
+    {
+        int reject = 0;
+        if (host->opts.max_inbound_conns > 0)
+        {
+            size_t count = 0;
+            pthread_mutex_lock(&host->mtx);
+            for (session_node_t *itc = host->sessions; itc; itc = itc->next)
+                count++;
+            pthread_mutex_unlock(&host->mtx);
+            if (count >= (size_t)host->opts.max_inbound_conns)
+                reject = 1;
+        }
+        if (!reject && host->conn_mgr)
+        {
+            int lw = 0, hw = 0, gm = 0;
+            (void)gm;
+            if (libp2p_conn_mgr_get_params(host->conn_mgr, &lw, &hw, NULL) == 0 && hw > 0)
+            {
+                size_t count = 0;
+                pthread_mutex_lock(&host->mtx);
+                for (session_node_t *itc = host->sessions; itc; itc = itc->next)
+                    count++;
+                pthread_mutex_unlock(&host->mtx);
+                if ((int)count >= hw)
+                    reject = 1;
+            }
+        }
+        if (reject)
+        {
+            libp2p_conn_free(secured);
+            if (remote_peer)
+                peer_id_destroy(remote_peer);
+            if (mx)
+                libp2p_muxer_free(mx);
+            libp2p_event_t evt = {0};
+            evt.kind = LIBP2P_EVT_INCOMING_CONNECTION_ERROR;
+            evt.u.incoming_conn_error.peer = NULL;
+            evt.u.incoming_conn_error.code = LIBP2P_ERR_AGAIN;
+            evt.u.incoming_conn_error.msg = "too many inbound connections";
+            libp2p_event_publish(host, &evt);
+            return LIBP2P_ERR_AGAIN;
+        }
+    }
+
+    if (host->gater_fn)
+    {
+        int str_err = 0;
+        char *addr_str = NULL;
+        const multiaddr_t *raddr = libp2p_conn_remote_addr(secured);
+        if (raddr)
+            addr_str = multiaddr_to_str(raddr, &str_err);
+        libp2p_gater_decision_t gd = host->gater_fn(addr_str ? addr_str : "", remote_peer, host->gater_ud);
+        if (addr_str)
+            free(addr_str);
+        if (gd == LIBP2P_GATER_DECISION_REJECT)
+        {
+            libp2p_conn_free(secured);
+            if (remote_peer)
+                peer_id_destroy(remote_peer);
+            if (mx)
+                libp2p_muxer_free(mx);
+            libp2p_event_t evt = {0};
+            evt.kind = LIBP2P_EVT_INCOMING_CONNECTION_ERROR;
+            evt.u.incoming_conn_error.peer = remote_peer;
+            evt.u.incoming_conn_error.code = LIBP2P_ERR_UNSUPPORTED;
+            evt.u.incoming_conn_error.msg = "connection gated/rejected";
+            libp2p_event_publish(host, &evt);
+            return LIBP2P_ERR_UNSUPPORTED;
+        }
+    }
+
+    int is_quic = libp2p_quic_conn_session(secured) ? 1 : 0;
+    LP_LOGI("HOST", "inbound conn established is_quic=%d has_remote_peer=%d mx=%p", is_quic, remote_peer ? 1 : 0, (void *)mx);
+
+    if (is_quic)
+    {
+        session_node_t *snode = (session_node_t *)calloc(1, sizeof(*snode));
+        if (snode)
+        {
+            snode->is_quic = 1;
+            if (remote_peer && remote_peer->bytes && remote_peer->size > 0)
+            {
+                snode->remote_peer = (peer_id_t *)calloc(1, sizeof(peer_id_t));
+                if (snode->remote_peer)
+                {
+                    snode->remote_peer->bytes = (uint8_t *)malloc(remote_peer->size);
+                    if (snode->remote_peer->bytes)
+                    {
+                        memcpy(snode->remote_peer->bytes, remote_peer->bytes, remote_peer->size);
+                        snode->remote_peer->size = remote_peer->size;
+                    }
+                    else
+                    {
+                        free(snode->remote_peer);
+                        snode->remote_peer = NULL;
+                    }
+                }
+            }
+            pthread_mutex_init(&snode->ready_mtx, NULL);
+            pthread_cond_init(&snode->ready_cv, NULL);
+            pthread_mutex_lock(&host->mtx);
+            snode->next = host->sessions;
+            host->sessions = snode;
+            pthread_mutex_unlock(&host->mtx);
+            pthread_mutex_lock(&snode->ready_mtx);
+            snode->mx = mx;
+            snode->conn = secured;
+            pthread_cond_broadcast(&snode->ready_cv);
+            pthread_mutex_unlock(&snode->ready_mtx);
+            LP_LOGI("HOST", "registered inbound QUIC session node=%p peer=%p mx=%p has_open_stream=%d",
+                    (void *)snode, (void *)snode->remote_peer, (void *)snode->mx,
+                    (snode->mx && snode->mx->vt && snode->mx->vt->open_stream) ? 1 : 0);
+        }
+        else
+        {
+            LP_LOGE("HOST", "failed to allocate session node for QUIC connection");
+        }
+    }
+
+    libp2p__emit_conn_opened(host, true, remote_peer, libp2p_conn_remote_addr(secured));
+
+    if (is_quic)
+    {
+        if (remote_peer)
+        {
+            peer_id_destroy(remote_peer);
+            free(remote_peer);
+        }
+        return 0;
+    }
+
+    inbound_session_ctx_t *ictx = calloc(1, sizeof(*ictx));
+    if (!ictx)
+    {
+        libp2p_conn_free(secured);
+        libp2p_muxer_free(mx);
+        if (remote_peer)
+            peer_id_destroy(remote_peer);
+        return LIBP2P_ERR_INTERNAL;
+    }
+
+    session_node_t *snode = (session_node_t *)calloc(1, sizeof(*snode));
+    if (snode)
+    {
+        snode->is_quic = 0;
+        pthread_mutex_init(&snode->ready_mtx, NULL);
+        pthread_cond_init(&snode->ready_cv, NULL);
+        pthread_mutex_lock(&host->mtx);
+        snode->next = host->sessions;
+        host->sessions = snode;
+        pthread_mutex_unlock(&host->mtx);
+        LP_LOGD("HOST", "registered inbound session node=%p", (void *)snode);
+    }
+
+    ictx->host = host;
+    ictx->conn = secured;
+    ictx->mx = mx;
+    ictx->peer = remote_peer;
+    ictx->snode = snode;
+    remote_peer = NULL;
+
+    pthread_t th;
+    if (mx && mx->vt && mx->vt->open_stream)
+    {
+        if (pthread_create(&th, NULL, inbound_session_thread, ictx) == 0)
+        {
+            if (snode)
+            {
+                pthread_mutex_lock(&snode->ready_mtx);
+                snode->thread = th;
+                pthread_cond_broadcast(&snode->ready_cv);
+                pthread_mutex_unlock(&snode->ready_mtx);
+            }
+            else
+            {
+                pthread_detach(th);
+            }
+            return 0;
+        }
+    }
+    else
+    {
+        if (pthread_create(&th, NULL, inbound_mplex_session_thread, ictx) == 0)
+        {
+            if (snode)
+            {
+                pthread_mutex_lock(&snode->ready_mtx);
+                snode->thread = th;
+                pthread_cond_broadcast(&snode->ready_cv);
+                pthread_mutex_unlock(&snode->ready_mtx);
+            }
+            else
+            {
+                pthread_detach(th);
+            }
+            return 0;
+        }
+    }
+
+    free(ictx);
+    libp2p_conn_free(secured);
+    libp2p_muxer_free(mx);
+    if (remote_peer)
+        peer_id_destroy(remote_peer);
+    if (snode)
+    {
+        pthread_mutex_lock(&host->mtx);
+        session_node_t **pp = &host->sessions;
+        while (*pp && *pp != snode)
+            pp = &(*pp)->next;
+        if (*pp == snode)
+            *pp = snode->next;
+        pthread_mutex_unlock(&host->mtx);
+        pthread_mutex_destroy(&snode->ready_mtx);
+        pthread_cond_destroy(&snode->ready_cv);
+        free(snode);
+    }
+    return LIBP2P_ERR_INTERNAL;
 }
 
 /* Runtime callback: handle connection readability and accept substreams */

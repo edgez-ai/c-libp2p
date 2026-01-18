@@ -562,6 +562,7 @@ add_library(libp2p_unified
     src/host/publish_service.c
     src/protocol/identify/identify_service.c
     src/protocol/identify/identify_public.c
+    src/protocol/relay/relay_v2_client.c
     src/host/events_bus.c
     src/host/callback_exec.c
     src/host/proto_select.c
