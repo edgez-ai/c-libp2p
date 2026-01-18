@@ -10,14 +10,58 @@
 #include <string.h>
 #include <time.h>
 #define PEER_ID_ED25519_KEY_TYPE 1
-#include "../../../external/libeddsa/lib/eddsa.h"
+/* Use LibTomCrypt for Ed25519 instead of libeddsa to ensure consistency with peer_id */
+#include "libp2p/crypto/ltc_compat.h"
 #include "../../../external/secp256k1/include/secp256k1.h"
 #include "../../../external/wjcryptlib/lib/WjCryptLib_Sha256.h"
 #include "multiformats/unsigned_varint/unsigned_varint.h"
 #include "peer_id/peer_id_secp256k1.h"
 #define PEER_ID_RSA_KEY_TYPE 0
 #define PEER_ID_ECDSA_KEY_TYPE 3
-#include "libp2p/crypto/ltc_compat.h"
+
+/* Initialize LibTomCrypt's multi-precision descriptor (required for Ed25519 ops).
+ * This MUST be called before any ltc_ed25519_* functions. Uses pthread_once for thread safety. */
+static pthread_once_t noise_ltc_mp_once = PTHREAD_ONCE_INIT;
+static void noise_init_ltc_mp(void)
+{
+#if defined(LTM_DESC)
+    extern const ltc_math_descriptor ltm_desc;
+    ltc_mp = ltm_desc;
+#elif defined(TFM_DESC)
+    extern const ltc_math_descriptor tfm_desc;
+    ltc_mp = tfm_desc;
+#elif defined(GMP_DESC)
+    extern const ltc_math_descriptor gmp_desc;
+    ltc_mp = gmp_desc;
+#else
+    ltc_mp.name = NULL;
+#endif
+}
+#define NOISE_INIT_LTC_MP() pthread_once(&noise_ltc_mp_once, noise_init_ltc_mp)
+
+/* Helper: derive Ed25519 public key from 32-byte seed using LibTomCrypt (same as peer_id).
+ * This ensures the Noise handshake identity matches the peer_id exactly. */
+static int ltc_ed25519_seed_to_pubkey(const uint8_t seed[32], uint8_t pub[32])
+{
+    NOISE_INIT_LTC_MP();
+    if (ltc_mp.name == NULL)
+        return -1;
+
+    curve25519_key ed_key;
+    int err = ed25519_import_raw(seed, 32, PK_PRIVATE, &ed_key);
+    if (err != CRYPT_OK)
+        return -1;
+
+    /* Export the public key in raw format (32 bytes) - same as peer_id_ed25519.c */
+    unsigned long pub_len = 32;
+    err = ed25519_export(pub, &pub_len, PK_PUBLIC, &ed_key);
+    memset(&ed_key, 0, sizeof(ed_key));
+
+    if (err != CRYPT_OK || pub_len != 32)
+        return -1;
+
+    return 0;
+}
 
 peer_id_error_t peer_id_create_from_private_key_rsa(const uint8_t *key_data, size_t key_data_len, uint8_t **pubkey_buf, size_t *pubkey_len);
 peer_id_error_t peer_id_create_from_private_key_ecdsa(const uint8_t *key_data, size_t key_data_len, uint8_t **pubkey_buf, size_t *pubkey_len);
@@ -81,11 +125,13 @@ static int build_handshake_payload(struct libp2p_noise_ctx *ctx, uint8_t **out, 
         for (size_t i = 0; i < ctx->identity_key_len && i < 32; i++) fprintf(stderr, "%02x", ctx->identity_key[i]);
         fprintf(stderr, "\n");
 
-        ed25519_genpub(id_pub, ctx->identity_key);
+        /* Use LibTomCrypt (same as peer_id) instead of libeddsa to ensure consistency */
+        if (ltc_ed25519_seed_to_pubkey(ctx->identity_key, id_pub) != 0)
+            return -1;
         id_pub_len = 32;
 
         /* Debug: print the generated public key */
-        fprintf(stderr, "[NOISE DEBUG] ed25519_genpub result: ");
+        fprintf(stderr, "[NOISE DEBUG] ltc_ed25519 pubkey result: ");
         for (size_t i = 0; i < 32; i++) fprintf(stderr, "%02x", id_pub[i]);
         fprintf(stderr, "\n");
 
@@ -141,6 +187,15 @@ static int build_handshake_payload(struct libp2p_noise_ctx *ctx, uint8_t **out, 
     {
         static pthread_mutex_t sign_mutex = PTHREAD_MUTEX_INITIALIZER;
         pthread_mutex_lock(&sign_mutex);
+
+        NOISE_INIT_LTC_MP();
+        if (ltc_mp.name == NULL)
+        {
+            pthread_mutex_unlock(&sign_mutex);
+            free(pubkey_pb);
+            return -1;
+        }
+
         signature = malloc(64);
         if (!signature)
         {
@@ -148,7 +203,26 @@ static int build_handshake_payload(struct libp2p_noise_ctx *ctx, uint8_t **out, 
             free(pubkey_pb);
             return -1;
         }
-        eddsa_sign(signature, ctx->identity_key, id_pub, to_sign, sizeof(to_sign));
+        /* Use LibTomCrypt for signing to ensure consistency with peer_id */
+        curve25519_key ed_key;
+        int err = ed25519_import_raw(ctx->identity_key, 32, PK_PRIVATE, &ed_key);
+        if (err != CRYPT_OK)
+        {
+            free(signature);
+            pthread_mutex_unlock(&sign_mutex);
+            free(pubkey_pb);
+            return -1;
+        }
+        unsigned long sig_out_len = 64;
+        err = ed25519_sign(to_sign, sizeof(to_sign), signature, &sig_out_len, &ed_key);
+        memset(&ed_key, 0, sizeof(ed_key));
+        if (err != CRYPT_OK)
+        {
+            free(signature);
+            pthread_mutex_unlock(&sign_mutex);
+            free(pubkey_pb);
+            return -1;
+        }
         sig_len = 64;
         pthread_mutex_unlock(&sign_mutex);
     }
@@ -379,7 +453,27 @@ static int verify_handshake_payload(NoiseHandshakeState *hs, const uint8_t *payl
 
     if (key_type == PEER_ID_ED25519_KEY_TYPE)
     {
-        if (fld_len != 64 || !eddsa_verify(sig, key_data, to_sign, sizeof(to_sign)))
+        if (fld_len != 64)
+        {
+            return -1;
+        }
+
+        NOISE_INIT_LTC_MP();
+        if (ltc_mp.name == NULL)
+        {
+            return -1;
+        }
+
+        /* Use LibTomCrypt for Ed25519 verify (consistency with peer_id) */
+        curve25519_key remote_ed_key;
+        if (ed25519_import_raw(key_data, key_data_len, PK_PUBLIC, &remote_ed_key) != CRYPT_OK)
+        {
+            return -1;
+        }
+        int verified = 0;
+        int err = ed25519_verify(sig, fld_len, to_sign, sizeof(to_sign), &verified, &remote_ed_key);
+        memset(&remote_ed_key, 0, sizeof(remote_ed_key));
+        if (err != CRYPT_OK || !verified)
         {
             return -1;
         }
