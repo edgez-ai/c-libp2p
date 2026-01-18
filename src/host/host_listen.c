@@ -7,8 +7,84 @@
 
 #include "host_internal.h"
 #include "proto_select_internal.h"
-        (void)libp2p__host_accept_inbound_raw(host, raw);
+#include "libp2p/error_map.h"
+#include "libp2p/events.h"
+#include "libp2p/io.h"
+#include "libp2p/log.h"
+#include "libp2p/lpmsg.h"
+#include "libp2p/peerstore.h"
+#include "libp2p/stream.h"
+#include "libp2p/protocol_listen.h"
+#include "libp2p/runtime.h"
+#include "libp2p/stream_internal.h"
+#include "protocol/identify/protocol_identify.h"
+#include "protocol/multiselect/protocol_multiselect.h"
+#include "protocol/muxer/mplex/mplex_io_adapter.h"
+#include "protocol/muxer/mplex/mplex_stream_adapter.h"
+#include "protocol/muxer/mplex/protocol_mplex.h"
+#include "protocol/muxer/yamux/protocol_yamux.h"
+#include "protocol/muxer/yamux/yamux_io_adapter.h"
+#include "protocol/muxer/yamux/yamux_stream_adapter.h"
+#include "protocol/noise/protocol_noise.h"
+#include "protocol/quic/protocol_quic.h"
+#include "transport/transport.h"
+#include "transport/upgrader.h"
+
+/* generic readiness helpers are provided by stream internals */
+
+/* Single-thread executor task for protocol on_open */
+typedef struct proto_on_open_task
+{
+    libp2p_stream_t *s;
+    libp2p_protocol_def_t def;
+} proto_on_open_task_t;
+
+static void cbexec_proto_on_open(void *ud)
+{
+    proto_on_open_task_t *t = (proto_on_open_task_t *)ud;
+    if (t && t->def.on_open)
+        t->def.on_open(t->s, t->def.user_data);
+    if (t && t->s)
+        libp2p__stream_release_async(t->s);
+    free(t);
 }
+
+/* no watchdog – runtime stops on io error/close */
+
+/* Minimal runtime callback context for inbound yamux session */
+typedef struct yamux_cb_ctx
+{
+    libp2p_runtime_t *rt;
+    libp2p_host_t *host;
+    libp2p_yamux_ctx_t *yctx;
+    libp2p_conn_t *secured;
+    /* First stream gets this exact peer pointer; subsequent streams use peer_template */
+    peer_id_t *first_peer;   /* owned by session until claimed; protect with mtx */
+    int accepted_count;      /* number of accepted substreams on this connection */
+    peer_id_t peer_template; /* a copy to duplicate for subsequent streams */
+    /* Runtime-driven stream readiness (push-mode + on_writable) */
+    pthread_mutex_t mtx;
+    struct push_stream_node *streams; /* singly-linked */
+} yamux_cb_ctx_t;
+
+static void inbound_yamux_on_io(int _fd, short events, void *ud);
+static void *inbound_substream_worker(void *arg);
+
+/* Forward declaration for listener thread */
+static void *listener_accept_thread(void *arg);
+
+/* Per-session push-mode stream tracking */
+typedef struct push_stream_node
+{
+    libp2p_stream_t *s;
+    libp2p_protocol_def_t def; /* valid when read_mode == PUSH and on_data set */
+    size_t cap;                /* optional inflight cap */
+    uint8_t *buf;              /* reusable buffer */
+    size_t buf_sz;
+    struct push_stream_node *next;
+} push_stream_node_t;
+
+static void cbctx_stream_cleanup(void *ctx, libp2p_stream_t *s);
 
 static void cbctx_configure_push(yamux_cb_ctx_t *c, libp2p_stream_t *s, const libp2p_protocol_def_t *def, size_t cap)
 {
