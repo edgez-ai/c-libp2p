@@ -19,23 +19,25 @@
 #define PEER_ID_RSA_KEY_TYPE 0
 #define PEER_ID_ECDSA_KEY_TYPE 3
 
-/* Initialize LibTomCrypt's multi-precision descriptor (required for Ed25519 ops).
- * This MUST be called before any ltc_ed25519_* functions. Uses pthread_once for thread safety.
- * Note: LTM_DESC is only defined for libtomcrypt target, not for libp2p sources,
- * so we directly use ltm_desc which is declared in tomcrypt_math.h (included via ltc_compat.h). */
-static pthread_once_t noise_ltc_mp_once = PTHREAD_ONCE_INIT;
-static void noise_init_ltc_mp(void)
+/* Initialize LibTomCrypt for Ed25519 operations.
+ * Ed25519 uses SHA-512 internally via find_hash("sha512"), so we must register it.
+ * Also sets ltc_mp to libtommath descriptor.
+ * Uses pthread_once for thread safety. */
+static pthread_once_t noise_ltc_init_once = PTHREAD_ONCE_INIT;
+static void noise_init_ltc(void)
 {
-    /* Always use libtommath - it's the only math provider we build with */
+    /* Register SHA-512 hash - required by Ed25519 (uses find_hash("sha512")) */
+    register_hash(&sha512_desc);
+    /* Set math provider to libtommath */
     ltc_mp = ltm_desc;
 }
-#define NOISE_INIT_LTC_MP() pthread_once(&noise_ltc_mp_once, noise_init_ltc_mp)
+#define NOISE_INIT_LTC() pthread_once(&noise_ltc_init_once, noise_init_ltc)
 
 /* Helper: derive Ed25519 public key from 32-byte seed using LibTomCrypt (same as peer_id).
  * This ensures the Noise handshake identity matches the peer_id exactly. */
 static int ltc_ed25519_seed_to_pubkey(const uint8_t seed[32], uint8_t pub[32])
 {
-    NOISE_INIT_LTC_MP();
+    NOISE_INIT_LTC();
     if (ltc_mp.name == NULL)
         return -1;
 
@@ -180,7 +182,7 @@ static int build_handshake_payload(struct libp2p_noise_ctx *ctx, uint8_t **out, 
         static pthread_mutex_t sign_mutex = PTHREAD_MUTEX_INITIALIZER;
         pthread_mutex_lock(&sign_mutex);
 
-        NOISE_INIT_LTC_MP();
+        NOISE_INIT_LTC();
         if (ltc_mp.name == NULL)
         {
             pthread_mutex_unlock(&sign_mutex);
@@ -450,7 +452,7 @@ static int verify_handshake_payload(NoiseHandshakeState *hs, const uint8_t *payl
             return -1;
         }
 
-        NOISE_INIT_LTC_MP();
+        NOISE_INIT_LTC();
         if (ltc_mp.name == NULL)
         {
             return -1;

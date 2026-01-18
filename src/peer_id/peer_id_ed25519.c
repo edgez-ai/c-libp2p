@@ -35,46 +35,43 @@ static void secure_zero(void *ptr, size_t len)
 #endif
 #endif
 
-/* Shared initializer for the LibTomCrypt multi‑precision descriptor */
+/* Shared initializer for LibTomCrypt.
+ * Ed25519 uses SHA-512 internally via find_hash("sha512"), so we must register it.
+ * Also sets ltc_mp to libtommath descriptor. */
 /**
- * @brief Initialize the multi-precision descriptor for LibTomCrypt.
+ * @brief Initialize LibTomCrypt for Ed25519 operations.
  */
-static void init_ltc_mp_shared(void)
+static void init_ltc_shared(void)
 {
-#if defined(LTM_DESC)
+    /* Register SHA-512 hash - required by Ed25519 (uses find_hash("sha512")) */
+    register_hash(&sha512_desc);
+    /* Set math provider to libtommath - always used in this build */
     ltc_mp = ltm_desc;
-#elif defined(TFM_DESC)
-    ltc_mp = tfm_desc;
-#elif defined(GMP_DESC)
-    ltc_mp = gmp_desc;
-#else
-    ltc_mp.name = NULL;
-#endif
 }
 
 #if defined(HAVE_C11_THREADS)
 
 /* C11 threads: use call_once */
-static once_flag ltc_mp_once = ONCE_FLAG_INIT;
-#define CALL_LTC_MP_INIT() call_once(&ltc_mp_once, init_ltc_mp_shared)
+static once_flag ltc_init_once = ONCE_FLAG_INIT;
+#define CALL_LTC_INIT() call_once(&ltc_init_once, init_ltc_shared)
 
 #elif defined(_WIN32)
 
 /* Windows InitOnce */
-static INIT_ONCE ltc_mp_once = INIT_ONCE_STATIC_INIT;
-static BOOL CALLBACK init_ltc_mp_windows(PINIT_ONCE, PVOID, PVOID *)
+static INIT_ONCE ltc_init_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK init_ltc_windows(PINIT_ONCE, PVOID, PVOID *)
 {
-    init_ltc_mp_shared();
+    init_ltc_shared();
     return TRUE;
 }
-#define CALL_LTC_MP_INIT() InitOnceExecuteOnce(&ltc_mp_once, init_ltc_mp_windows, NULL, NULL)
+#define CALL_LTC_INIT() InitOnceExecuteOnce(&ltc_init_once, init_ltc_windows, NULL, NULL)
 
 #else
 
 /* POSIX pthreads */
 #include <pthread.h>
-static pthread_once_t ltc_mp_once = PTHREAD_ONCE_INIT;
-#define CALL_LTC_MP_INIT() pthread_once(&ltc_mp_once, init_ltc_mp_shared)
+static pthread_once_t ltc_init_once = PTHREAD_ONCE_INIT;
+#define CALL_LTC_INIT() pthread_once(&ltc_init_once, init_ltc_shared)
 
 #endif
 
@@ -94,7 +91,7 @@ peer_id_error_t peer_id_create_from_private_key_ed25519(const uint8_t *key_data,
         return PEER_ID_E_NULL_PTR;
     }
 
-    CALL_LTC_MP_INIT();
+    CALL_LTC_INIT();
     if (ltc_mp.name == NULL)
     {
         return PEER_ID_E_CRYPTO_FAILED;
