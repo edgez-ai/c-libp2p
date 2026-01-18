@@ -20,22 +20,14 @@
 #define PEER_ID_ECDSA_KEY_TYPE 3
 
 /* Initialize LibTomCrypt's multi-precision descriptor (required for Ed25519 ops).
- * This MUST be called before any ltc_ed25519_* functions. Uses pthread_once for thread safety. */
+ * This MUST be called before any ltc_ed25519_* functions. Uses pthread_once for thread safety.
+ * Note: LTM_DESC is only defined for libtomcrypt target, not for libp2p sources,
+ * so we directly use ltm_desc which is declared in tomcrypt_math.h (included via ltc_compat.h). */
 static pthread_once_t noise_ltc_mp_once = PTHREAD_ONCE_INIT;
 static void noise_init_ltc_mp(void)
 {
-#if defined(LTM_DESC)
-    extern const ltc_math_descriptor ltm_desc;
+    /* Always use libtommath - it's the only math provider we build with */
     ltc_mp = ltm_desc;
-#elif defined(TFM_DESC)
-    extern const ltc_math_descriptor tfm_desc;
-    ltc_mp = tfm_desc;
-#elif defined(GMP_DESC)
-    extern const ltc_math_descriptor gmp_desc;
-    ltc_mp = gmp_desc;
-#else
-    ltc_mp.name = NULL;
-#endif
 }
 #define NOISE_INIT_LTC_MP() pthread_once(&noise_ltc_mp_once, noise_init_ltc_mp)
 
