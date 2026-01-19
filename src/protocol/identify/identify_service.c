@@ -22,6 +22,19 @@
 #include "libp2p/stream.h"
 #include "libp2p/stream_internal.h"
 
+static int is_unspecified_listen_addr(const multiaddr_t *ma)
+{
+    if (!ma)
+        return 0;
+    int err = 0;
+    char *s = multiaddr_to_str(ma, &err);
+    if (!s)
+        return 0;
+    int bad = (strstr(s, "/ip4/0.0.0.0/") != NULL) || (strstr(s, "/ip6/::/") != NULL);
+    free(s);
+    return bad;
+}
+
 typedef struct identify_srv_ctx
 {
     libp2p_stream_t *s;
@@ -564,6 +577,11 @@ int libp2p_identify_encode_local(struct libp2p_host *host, libp2p_stream_t *s, i
         multiaddr_t *ma = NULL;
         if (ln->lst && libp2p_listener_local_addr(ln->lst, &ma) == LIBP2P_LISTENER_OK && ma)
         {
+            if (is_unspecified_listen_addr(ma))
+            {
+                multiaddr_free(ma);
+                continue;
+            }
             uint8_t tmp[512];
             int wrote = multiaddr_get_bytes(ma, tmp, sizeof(tmp));
             if (wrote == MULTIADDR_ERR_BUFFER_TOO_SMALL)
@@ -626,6 +644,63 @@ int libp2p_identify_encode_local(struct libp2p_host *host, libp2p_stream_t *s, i
             multiaddr_t *ma = multiaddr_new_from_str(astr, &ma_err);
             if (!ma)
                 continue;
+            uint8_t tmp[512];
+            int wrote = multiaddr_get_bytes(ma, tmp, sizeof(tmp));
+            if (wrote == MULTIADDR_ERR_BUFFER_TOO_SMALL)
+            {
+                size_t cap = 4096;
+                uint8_t *heap = (uint8_t *)malloc(cap);
+                if (heap)
+                {
+                    int w2 = multiaddr_get_bytes(ma, heap, cap);
+                    if (w2 > 0)
+                    {
+                        uint8_t **new_addrs = (uint8_t **)realloc(msg.listen_addrs, (msg.num_listen_addrs + 1) * sizeof(uint8_t *));
+                        size_t *new_lens = (size_t *)realloc(msg.listen_addrs_lens, (msg.num_listen_addrs + 1) * sizeof(size_t));
+                        if (new_addrs && new_lens)
+                        {
+                            msg.listen_addrs = new_addrs;
+                            msg.listen_addrs_lens = new_lens;
+                            msg.listen_addrs[msg.num_listen_addrs] = (uint8_t *)malloc((size_t)w2);
+                            if (msg.listen_addrs[msg.num_listen_addrs])
+                            {
+                                memcpy(msg.listen_addrs[msg.num_listen_addrs], heap, (size_t)w2);
+                                msg.listen_addrs_lens[msg.num_listen_addrs] = (size_t)w2;
+                                msg.num_listen_addrs++;
+                            }
+                        }
+                    }
+                    free(heap);
+                }
+            }
+            else if (wrote > 0)
+            {
+                uint8_t **new_addrs = (uint8_t **)realloc(msg.listen_addrs, (msg.num_listen_addrs + 1) * sizeof(uint8_t *));
+                size_t *new_lens = (size_t *)realloc(msg.listen_addrs_lens, (msg.num_listen_addrs + 1) * sizeof(size_t));
+                if (new_addrs && new_lens)
+                {
+                    msg.listen_addrs = new_addrs;
+                    msg.listen_addrs_lens = new_lens;
+                    msg.listen_addrs[msg.num_listen_addrs] = (uint8_t *)malloc((size_t)wrote);
+                    if (msg.listen_addrs[msg.num_listen_addrs])
+                    {
+                        memcpy(msg.listen_addrs[msg.num_listen_addrs], tmp, (size_t)wrote);
+                        msg.listen_addrs_lens[msg.num_listen_addrs] = (size_t)wrote;
+                        msg.num_listen_addrs++;
+                    }
+                }
+            }
+            multiaddr_free(ma);
+        }
+    }
+
+    const char *adv = getenv("LIBP2P_ADVERTISE_ADDR");
+    if (adv && adv[0] != '\0')
+    {
+        int ma_err = 0;
+        multiaddr_t *ma = multiaddr_new_from_str(adv, &ma_err);
+        if (ma)
+        {
             uint8_t tmp[512];
             int wrote = multiaddr_get_bytes(ma, tmp, sizeof(tmp));
             if (wrote == MULTIADDR_ERR_BUFFER_TOO_SMALL)
