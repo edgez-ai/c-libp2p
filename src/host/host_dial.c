@@ -580,7 +580,9 @@ static int do_dial_and_select(libp2p_host_t *host, const char *remote_multiaddr,
                     return LIBP2P_ERR_CANCELED;
                 }
                 libp2p_stream_t *s = NULL;
-                if (mx->vt->open_stream(mx, NULL, 0, &s) == LIBP2P_MUXER_OK && s)
+                libp2p_muxer_err_t mxerr = mx->vt->open_stream(mx, NULL, 0, &s);
+                fprintf(stderr, "[DIAL REUSE] open_stream returned %d, stream=%p\n", (int)mxerr, (void*)s);
+                if (mxerr == LIBP2P_MUXER_OK && s)
                 {
                     libp2p_io_t *io = libp2p_io_from_stream(s);
                     const char *accepted = NULL;
@@ -588,6 +590,7 @@ static int do_dial_and_select(libp2p_host_t *host, const char *remote_multiaddr,
                     {
                         libp2p_multiselect_err_t ms = libp2p_multiselect_dial_io(
                             io, proposals, host->opts.multiselect_handshake_timeout_ms, &accepted);
+                        fprintf(stderr, "[DIAL REUSE] multiselect returned %d, accepted=%s\n", (int)ms, accepted ? accepted : "(null)");
                         libp2p_io_free(io);
                         if (ms == LIBP2P_MULTISELECT_OK && accepted)
                         {
