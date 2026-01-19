@@ -1314,6 +1314,12 @@ int libp2p__host_accept_inbound_raw(libp2p_host_t *host, libp2p_conn_t *raw)
         if (*pp == snode)
             *pp = snode->next;
         pthread_mutex_unlock(&host->mtx);
+        if (snode->remote_peer)
+        {
+            if (snode->remote_peer->bytes)
+                free(snode->remote_peer->bytes);
+            free(snode->remote_peer);
+        }
         pthread_mutex_destroy(&snode->ready_mtx);
         pthread_cond_destroy(&snode->ready_cv);
         free(snode);
@@ -2033,6 +2039,14 @@ int libp2p_host_stop(libp2p_host_t *host)
             }
             sn->mx = NULL;
         }
+        /* Free remote_peer if allocated */
+        if (sn->remote_peer)
+        {
+            if (sn->remote_peer->bytes)
+                free(sn->remote_peer->bytes);
+            free(sn->remote_peer);
+            sn->remote_peer = NULL;
+        }
         /* destroy ready primitives and free */
         pthread_mutex_destroy(&sn->ready_mtx);
         pthread_cond_destroy(&sn->ready_cv);
@@ -2567,6 +2581,12 @@ static void *listener_accept_thread(void *arg)
                     if (*pp == snode)
                         *pp = snode->next;
                     pthread_mutex_unlock(&host->mtx);
+                    if (snode->remote_peer)
+                    {
+                        if (snode->remote_peer->bytes)
+                            free(snode->remote_peer->bytes);
+                        free(snode->remote_peer);
+                    }
                     pthread_mutex_destroy(&snode->ready_mtx);
                     pthread_cond_destroy(&snode->ready_cv);
                     free(snode);
@@ -2603,6 +2623,12 @@ static void *listener_accept_thread(void *arg)
                     if (*pp == snode)
                         *pp = snode->next;
                     pthread_mutex_unlock(&host->mtx);
+                    if (snode->remote_peer)
+                    {
+                        if (snode->remote_peer->bytes)
+                            free(snode->remote_peer->bytes);
+                        free(snode->remote_peer);
+                    }
                     pthread_mutex_destroy(&snode->ready_mtx);
                     pthread_cond_destroy(&snode->ready_cv);
                     free(snode);

@@ -1239,6 +1239,28 @@ static int do_dial_and_select(libp2p_host_t *host, const char *remote_multiaddr,
         {
             pthread_mutex_init(&snode->ready_mtx, NULL);
             pthread_cond_init(&snode->ready_cv, NULL);
+
+            /* Copy remote peer for session lookup (enables connection reuse) */
+            const peer_id_t *stream_peer = libp2p_stream_remote_peer(ss);
+            if (stream_peer && stream_peer->bytes && stream_peer->size > 0)
+            {
+                snode->remote_peer = (peer_id_t *)calloc(1, sizeof(peer_id_t));
+                if (snode->remote_peer)
+                {
+                    snode->remote_peer->bytes = (uint8_t *)malloc(stream_peer->size);
+                    if (snode->remote_peer->bytes)
+                    {
+                        memcpy(snode->remote_peer->bytes, stream_peer->bytes, stream_peer->size);
+                        snode->remote_peer->size = stream_peer->size;
+                    }
+                    else
+                    {
+                        free(snode->remote_peer);
+                        snode->remote_peer = NULL;
+                    }
+                }
+            }
+
             /* Publish into host list so host_stop can stop/join. */
             pthread_mutex_lock(&host->mtx);
             snode->next = host->sessions;
