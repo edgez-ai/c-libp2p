@@ -640,6 +640,8 @@ int libp2p_identify_encode_local(struct libp2p_host *host, libp2p_stream_t *s, i
             const char *astr = host->opts.listen_addrs[i];
             if (!astr)
                 continue;
+            if (strstr(astr, "/ip4/0.0.0.0/") || strstr(astr, "/ip6/::/"))
+                continue;
             int ma_err = 0;
             multiaddr_t *ma = multiaddr_new_from_str(astr, &ma_err);
             if (!ma)
