@@ -532,102 +532,133 @@ static int do_dial_and_select(libp2p_host_t *host, const char *remote_multiaddr,
 
         if (have_peer)
         {
-            libp2p_muxer_t *mx = NULL;
-            peer_id_t *peer_copy = NULL;
             char target_peer_str[128] = {0};
             peer_id_to_string(&peer, PEER_ID_FMT_BASE58_LEGACY, target_peer_str, sizeof(target_peer_str));
-            pthread_mutex_lock(&host->mtx);
+            
+            /* Try all matching sessions until we find one that works */
             int session_count = 0;
+            int tried = 0;
+            int reuse_success = 0;
+            
+            pthread_mutex_lock(&host->mtx);
             for (session_node_t *sess = host->sessions; sess; sess = sess->next)
                 session_count++;
-            fprintf(stderr, "[DIAL REUSE] looking for peer=%s in %d sessions\n", target_peer_str, session_count);
-            for (session_node_t *sess = host->sessions; sess; sess = sess->next)
-            {
-                if (!sess->mx || !sess->mx->vt || !sess->mx->vt->open_stream)
-                {
-                    fprintf(stderr, "[DIAL REUSE] session %p: no muxer or open_stream\n", (void*)sess);
-                    continue;
-                }
-                if (!sess->remote_peer || !sess->remote_peer->bytes || !peer.bytes)
-                {
-                    fprintf(stderr, "[DIAL REUSE] session %p: no remote_peer (remote_peer=%p)\n", (void*)sess, (void*)sess->remote_peer);
-                    continue;
-                }
-                char sess_peer_str[128] = {0};
-                peer_id_to_string(sess->remote_peer, PEER_ID_FMT_BASE58_LEGACY, sess_peer_str, sizeof(sess_peer_str));
-                if (sess->remote_peer->size != peer.size)
-                {
-                    fprintf(stderr, "[DIAL REUSE] session %p: peer size mismatch (sess=%s)\n", (void*)sess, sess_peer_str);
-                    continue;
-                }
-                if (memcmp(sess->remote_peer->bytes, peer.bytes, peer.size) != 0)
-                {
-                    fprintf(stderr, "[DIAL REUSE] session %p: peer bytes mismatch (sess=%s vs target=%s)\n", (void*)sess, sess_peer_str, target_peer_str);
-                    continue;
-                }
-                fprintf(stderr, "[DIAL REUSE] session %p: FOUND matching session for peer=%s\n", (void*)sess, sess_peer_str);
-                mx = sess->mx;
-                peer_copy = peer_id_dup(sess->remote_peer);
-                break;
-            }
             pthread_mutex_unlock(&host->mtx);
-
-            if (mx)
+            
+            fprintf(stderr, "[DIAL REUSE] looking for peer=%s in %d sessions\n", target_peer_str, session_count);
+            
+            while (!reuse_success)
             {
+                libp2p_muxer_t *mx = NULL;
+                peer_id_t *peer_copy = NULL;
+                session_node_t *found_sess = NULL;
+                int skip_count = tried;
+                
+                pthread_mutex_lock(&host->mtx);
+                for (session_node_t *sess = host->sessions; sess; sess = sess->next)
+                {
+                    if (!sess->mx || !sess->mx->vt || !sess->mx->vt->open_stream)
+                        continue;
+                    if (!sess->remote_peer || !sess->remote_peer->bytes || !peer.bytes)
+                        continue;
+                    if (sess->remote_peer->size != peer.size)
+                        continue;
+                    if (memcmp(sess->remote_peer->bytes, peer.bytes, peer.size) != 0)
+                        continue;
+                    /* Found a matching session */
+                    if (skip_count > 0)
+                    {
+                        skip_count--;
+                        continue;
+                    }
+                    mx = sess->mx;
+                    peer_copy = peer_id_dup(sess->remote_peer);
+                    found_sess = sess;
+                    break;
+                }
+                pthread_mutex_unlock(&host->mtx);
+                
+                if (!mx)
+                    break; /* No more matching sessions to try */
+                
+                tried++;
+                fprintf(stderr, "[DIAL REUSE] trying session %p (attempt %d)\n", (void*)found_sess, tried);
+                
                 if (cancel && libp2p_cancel_token_is_canceled(cancel))
                 {
+                    if (peer_copy) { peer_id_destroy(peer_copy); free(peer_copy); }
                     peer_id_destroy(&peer);
                     return LIBP2P_ERR_CANCELED;
                 }
+                
                 libp2p_stream_t *s = NULL;
                 libp2p_muxer_err_t mxerr = mx->vt->open_stream(mx, NULL, 0, &s);
                 fprintf(stderr, "[DIAL REUSE] open_stream returned %d, stream=%p\n", (int)mxerr, (void*)s);
-                if (mxerr == LIBP2P_MUXER_OK && s)
+                
+                if (mxerr != LIBP2P_MUXER_OK || !s)
                 {
-                    libp2p_io_t *io = libp2p_io_from_stream(s);
-                    const char *accepted = NULL;
-                    if (io)
+                    /* Mark this session as dead by removing it from the list */
+                    fprintf(stderr, "[DIAL REUSE] session %p is dead (open_stream failed), removing\n", (void*)found_sess);
+                    pthread_mutex_lock(&host->mtx);
+                    session_node_t **pp = &host->sessions;
+                    while (*pp)
                     {
-                        libp2p_multiselect_err_t ms = libp2p_multiselect_dial_io(
-                            io, proposals, host->opts.multiselect_handshake_timeout_ms, &accepted);
-                        fprintf(stderr, "[DIAL REUSE] multiselect returned %d, accepted=%s\n", (int)ms, accepted ? accepted : "(null)");
-                        libp2p_io_free(io);
-                        if (ms == LIBP2P_MULTISELECT_OK && accepted)
+                        if (*pp == found_sess)
                         {
-                            if (accepted_out)
-                                *accepted_out = accepted;
-                            else
-                                free((void *)accepted);
-                            if (peer_copy)
+                            *pp = found_sess->next;
+                            if (found_sess->remote_peer)
                             {
-                                if (libp2p_stream_set_remote_peer(s, peer_copy) != 0)
-                                {
-                                    peer_id_destroy(peer_copy);
-                                    free(peer_copy);
-                                }
+                                if (found_sess->remote_peer->bytes)
+                                    free(found_sess->remote_peer->bytes);
+                                free(found_sess->remote_peer);
                             }
-                            *out_stream = s;
-                            peer_id_destroy(&peer);
-                            LP_LOGD("HOST_DIAL", "reused existing session for %s", remote_multiaddr);
-                            fprintf(stderr, "[LANTERN DIAL] reused existing session by peer %s\n",
-                                    remote_multiaddr ? remote_multiaddr : "(unknown)");
-                            return 0;
+                            /* Note: we don't free muxer/conn here as they may still be in use */
+                            free(found_sess);
+                            break;
                         }
+                        pp = &(*pp)->next;
+                    }
+                    pthread_mutex_unlock(&host->mtx);
+                    if (peer_copy) { peer_id_destroy(peer_copy); free(peer_copy); }
+                    tried--; /* Adjust since we removed the session */
+                    continue; /* Try next session */
+                }
+                
+                libp2p_io_t *io = libp2p_io_from_stream(s);
+                const char *accepted = NULL;
+                if (io)
+                {
+                    libp2p_multiselect_err_t ms = libp2p_multiselect_dial_io(
+                        io, proposals, host->opts.multiselect_handshake_timeout_ms, &accepted);
+                    fprintf(stderr, "[DIAL REUSE] multiselect returned %d, accepted=%s\n", (int)ms, accepted ? accepted : "(null)");
+                    libp2p_io_free(io);
+                    
+                    if (ms == LIBP2P_MULTISELECT_OK && accepted)
+                    {
+                        if (accepted_out)
+                            *accepted_out = accepted;
+                        else
+                            free((void *)accepted);
+                        if (peer_copy)
+                        {
+                            if (libp2p_stream_set_remote_peer(s, peer_copy) != 0)
+                            {
+                                peer_id_destroy(peer_copy);
+                                free(peer_copy);
+                            }
+                        }
+                        *out_stream = s;
+                        peer_id_destroy(&peer);
+                        LP_LOGD("HOST_DIAL", "reused existing session for %s", remote_multiaddr);
+                        fprintf(stderr, "[DIAL REUSE] SUCCESS reused session for peer %s\n", target_peer_str);
+                        return 0;
                     }
                     if (accepted)
                         free((void *)accepted);
-                    if (peer_copy)
-                    {
-                        peer_id_destroy(peer_copy);
-                        free(peer_copy);
-                    }
-                    libp2p_stream_free(s);
                 }
-                else if (peer_copy)
-                {
-                    peer_id_destroy(peer_copy);
-                    free(peer_copy);
-                }
+                if (peer_copy) { peer_id_destroy(peer_copy); free(peer_copy); }
+                libp2p_stream_free(s);
+                /* Continue to try next session */
             }
             peer_id_destroy(&peer);
         }
