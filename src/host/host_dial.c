@@ -534,17 +534,38 @@ static int do_dial_and_select(libp2p_host_t *host, const char *remote_multiaddr,
         {
             libp2p_muxer_t *mx = NULL;
             peer_id_t *peer_copy = NULL;
+            char target_peer_str[128] = {0};
+            peer_id_to_string(&peer, PEER_ID_FMT_BASE58_LEGACY, target_peer_str, sizeof(target_peer_str));
             pthread_mutex_lock(&host->mtx);
+            int session_count = 0;
+            for (session_node_t *sess = host->sessions; sess; sess = sess->next)
+                session_count++;
+            fprintf(stderr, "[DIAL REUSE] looking for peer=%s in %d sessions\n", target_peer_str, session_count);
             for (session_node_t *sess = host->sessions; sess; sess = sess->next)
             {
                 if (!sess->mx || !sess->mx->vt || !sess->mx->vt->open_stream)
+                {
+                    fprintf(stderr, "[DIAL REUSE] session %p: no muxer or open_stream\n", (void*)sess);
                     continue;
+                }
                 if (!sess->remote_peer || !sess->remote_peer->bytes || !peer.bytes)
+                {
+                    fprintf(stderr, "[DIAL REUSE] session %p: no remote_peer (remote_peer=%p)\n", (void*)sess, (void*)sess->remote_peer);
                     continue;
+                }
+                char sess_peer_str[128] = {0};
+                peer_id_to_string(sess->remote_peer, PEER_ID_FMT_BASE58_LEGACY, sess_peer_str, sizeof(sess_peer_str));
                 if (sess->remote_peer->size != peer.size)
+                {
+                    fprintf(stderr, "[DIAL REUSE] session %p: peer size mismatch (sess=%s)\n", (void*)sess, sess_peer_str);
                     continue;
+                }
                 if (memcmp(sess->remote_peer->bytes, peer.bytes, peer.size) != 0)
+                {
+                    fprintf(stderr, "[DIAL REUSE] session %p: peer bytes mismatch (sess=%s vs target=%s)\n", (void*)sess, sess_peer_str, target_peer_str);
                     continue;
+                }
+                fprintf(stderr, "[DIAL REUSE] session %p: FOUND matching session for peer=%s\n", (void*)sess, sess_peer_str);
                 mx = sess->mx;
                 peer_copy = peer_id_dup(sess->remote_peer);
                 break;
