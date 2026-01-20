@@ -1008,19 +1008,16 @@ static void dcutr_event_handler(const libp2p_event_t *evt, void *user_data)
             libp2p_dcutr_add_observed_addr(svc, addr);
         }
     }
-    else if (evt->kind == LIBP2P_EVT_CONN_OPENED)
+    else if (evt->kind == LIBP2P_EVT_RELAY_CONN_ACCEPTED)
     {
-        /* Check if this is a relay connection (contains /p2p-circuit) */
-        const char *addr = evt->u.conn_opened.addr;
-        const peer_id_t *peer = evt->u.conn_opened.peer;
-        bool inbound = evt->u.conn_opened.inbound;
+        /* A relay connection was accepted - try DCUtR upgrade */
+        const peer_id_t *peer = evt->u.relay_conn_accepted.peer;
 
-        if (addr && peer && strstr(addr, "/p2p-circuit") != NULL)
+        if (peer)
         {
             char peer_str[128] = {0};
             peer_id_to_string(peer, PEER_ID_FMT_BASE58_LEGACY, peer_str, sizeof(peer_str));
-            fprintf(stderr, "[DCUTR] detected relay connection to peer=%s inbound=%d addr=%s\n",
-                    peer_str, inbound, addr);
+            fprintf(stderr, "[DCUTR] received RELAY_CONN_ACCEPTED event for peer=%s\n", peer_str);
 
             /* Check if we have observed addresses (meaning we're behind NAT) */
             pthread_mutex_lock(&svc->mtx);

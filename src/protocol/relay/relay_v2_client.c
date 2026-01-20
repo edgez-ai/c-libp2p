@@ -8,6 +8,7 @@
 
 #include "host_internal.h"
 #include "libp2p/errors.h"
+#include "libp2p/events.h"
 #include "libp2p/log.h"
 #include "libp2p/lpmsg.h"
 #include "libp2p/protocol.h"
@@ -171,7 +172,39 @@ typedef struct
 {
     int type_set;
     uint64_t type;
+    /* Peer info from StopMessage.peer field */
+    uint8_t *peer_id_bytes;
+    size_t peer_id_len;
 } stop_msg_t;
+
+static void stop_msg_free(stop_msg_t *msg)
+{
+    if (msg)
+    {
+        free(msg->peer_id_bytes);
+        msg->peer_id_bytes = NULL;
+        msg->peer_id_len = 0;
+    }
+}
+
+/* Create a peer_id_t from raw multihash bytes (used for STOP message peer field) */
+static peer_id_t *peer_id_from_multihash_bytes(const uint8_t *bytes, size_t len)
+{
+    if (!bytes || len == 0)
+        return NULL;
+    peer_id_t *pid = (peer_id_t *)calloc(1, sizeof(*pid));
+    if (!pid)
+        return NULL;
+    pid->bytes = (uint8_t *)malloc(len);
+    if (!pid->bytes)
+    {
+        free(pid);
+        return NULL;
+    }
+    memcpy(pid->bytes, bytes, len);
+    pid->size = len;
+    return pid;
+}
 
 static int parse_reservation(const uint8_t *buf, size_t len, hop_msg_t *out)
 {
@@ -305,11 +338,53 @@ static int parse_stop_message(const uint8_t *buf, size_t len, stop_msg_t *out)
         uint64_t wire = key & 0x7;
         if (field == 1 && wire == 0)
         {
+            /* Type field */
             uint64_t v = 0;
             if (pb_read_varint(buf, len, &off, &v) != 0)
                 return -1;
             out->type_set = 1;
             out->type = v;
+            continue;
+        }
+        if (field == 2 && wire == 2)
+        {
+            /* Peer field - length-delimited submessage */
+            uint64_t peer_len = 0;
+            if (pb_read_varint(buf, len, &off, &peer_len) != 0 || off + peer_len > len)
+                return -1;
+            /* Parse Peer submessage to extract id (field 1) */
+            size_t peer_off = 0;
+            while (peer_off < peer_len)
+            {
+                uint64_t pkey = 0;
+                size_t peer_start = off + peer_off;
+                if (pb_read_varint(buf + off, peer_len, &peer_off, &pkey) != 0)
+                    break;
+                uint64_t pfield = pkey >> 3;
+                uint64_t pwire = pkey & 0x7;
+                if (pfield == 1 && pwire == 2)
+                {
+                    /* Peer.id - bytes */
+                    uint64_t id_len = 0;
+                    if (pb_read_varint(buf + off, peer_len, &peer_off, &id_len) != 0)
+                        break;
+                    if (peer_off + id_len <= peer_len && id_len > 0)
+                    {
+                        out->peer_id_bytes = (uint8_t *)malloc(id_len);
+                        if (out->peer_id_bytes)
+                        {
+                            memcpy(out->peer_id_bytes, buf + off + peer_off, id_len);
+                            out->peer_id_len = id_len;
+                        }
+                        peer_off += id_len;
+                    }
+                    continue;
+                }
+                /* Skip other Peer fields */
+                if (pb_skip_field(buf + off, peer_len, &peer_off, pwire) != 0)
+                    break;
+            }
+            off += peer_len;
             continue;
         }
         if (pb_skip_field(buf, len, &off, wire) != 0)
@@ -501,11 +576,25 @@ static void *relay_stop_worker(void *arg)
         if (out.buf && out.len)
             (void)libp2p_lp_send(s, out.buf, out.len);
         free(out.buf);
+        stop_msg_free(&smsg);
         libp2p_stream_close(s);
         libp2p__stream_release_async(s);
         if (host)
             libp2p__worker_dec(host);
         return NULL;
+    }
+
+    /* Extract and log the initiator peer ID */
+    peer_id_t *initiator_peer = NULL;
+    if (smsg.peer_id_bytes && smsg.peer_id_len > 0)
+    {
+        initiator_peer = peer_id_from_multihash_bytes(smsg.peer_id_bytes, smsg.peer_id_len);
+        if (initiator_peer)
+        {
+            char init_str[128] = {0};
+            peer_id_to_string(initiator_peer, PEER_ID_FMT_BASE58_LEGACY, init_str, sizeof(init_str));
+            fprintf(stderr, "[RELAY STOP] initiator peer from STOP message: %s\n", init_str);
+        }
     }
 
     if (smsg.type != 0)
@@ -515,6 +604,9 @@ static void *relay_stop_worker(void *arg)
         if (out.buf && out.len)
             (void)libp2p_lp_send(s, out.buf, out.len);
         free(out.buf);
+        stop_msg_free(&smsg);
+        if (initiator_peer)
+            peer_id_destroy(initiator_peer);
         libp2p_stream_close(s);
         libp2p__stream_release_async(s);
         if (host)
@@ -526,6 +618,9 @@ static void *relay_stop_worker(void *arg)
     if (encode_stop_status(&out, LIBP2P_RELAY_V2_STATUS_OK) != 0 || !out.buf || !out.len)
     {
         free(out.buf);
+        stop_msg_free(&smsg);
+        if (initiator_peer)
+            peer_id_destroy(initiator_peer);
         libp2p_stream_close(s);
         libp2p__stream_release_async(s);
         if (host)
@@ -534,10 +629,13 @@ static void *relay_stop_worker(void *arg)
     }
     (void)libp2p_lp_send(s, out.buf, out.len);
     free(out.buf);
+    stop_msg_free(&smsg);
 
     libp2p_conn_t *raw = relay_conn_from_stream(s);
     if (!raw)
     {
+        if (initiator_peer)
+            peer_id_destroy(initiator_peer);
         libp2p_stream_close(s);
         libp2p_stream_free(s);
         libp2p__stream_release_async(s);
@@ -549,12 +647,30 @@ static void *relay_stop_worker(void *arg)
     int rc = libp2p__host_accept_inbound_raw(host, raw);
     if (rc != 0)
     {
+        if (initiator_peer)
+            peer_id_destroy(initiator_peer);
         libp2p_conn_free(raw);
         libp2p__stream_release_async(s);
         if (host)
             libp2p__worker_dec(host);
         return NULL;
     }
+
+    /* Emit RELAY_CONN_ACCEPTED event for DCUtR to trigger upgrade */
+    if (initiator_peer && host)
+    {
+        char init_str[128] = {0};
+        peer_id_to_string(initiator_peer, PEER_ID_FMT_BASE58_LEGACY, init_str, sizeof(init_str));
+        fprintf(stderr, "[RELAY STOP] accepted relay connection from initiator=%s, emitting event\n", init_str);
+
+        libp2p_event_t evt = {0};
+        evt.kind = LIBP2P_EVT_RELAY_CONN_ACCEPTED;
+        evt.u.relay_conn_accepted.peer = initiator_peer;
+        libp2p_event_publish(host, &evt);
+    }
+
+    if (initiator_peer)
+        peer_id_destroy(initiator_peer);
 
     /* ownership transferred to connection/session */
     libp2p__stream_release_async(s);

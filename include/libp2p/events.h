@@ -35,7 +35,8 @@ typedef enum
     LIBP2P_EVT_STREAM_OPENED,
     LIBP2P_EVT_STREAM_CLOSED,
     LIBP2P_EVT_PROTOCOL_NEGOTIATED,
-    LIBP2P_EVT_ERROR
+    LIBP2P_EVT_ERROR,
+    LIBP2P_EVT_RELAY_CONN_ACCEPTED  /* New: relay connection accepted via STOP */
 } libp2p_event_kind_t;
 
 typedef struct
@@ -109,6 +110,10 @@ typedef struct
     int code;
     const char *msg;
 } libp2p_evt_error_t;
+typedef struct
+{
+    const peer_id_t *peer;  /* The remote peer connected via relay */
+} libp2p_evt_relay_conn_accepted_t;
 
 typedef struct
 {
@@ -132,6 +137,7 @@ typedef struct
         libp2p_evt_stream_closed_t stream_closed;
         libp2p_evt_protocol_negotiated_t protocol_negotiated;
         libp2p_evt_error_t error;
+        libp2p_evt_relay_conn_accepted_t relay_conn_accepted;
     } u;
 } libp2p_event_t;
 
