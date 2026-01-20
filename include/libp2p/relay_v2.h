@@ -46,6 +46,14 @@ int libp2p_relay_v2_client_stop(libp2p_host_t *host);
 /* Reserve a slot on a relay. Returns 0 on success. */
 int libp2p_relay_v2_reserve(libp2p_host_t *host, const char *relay_multiaddr, int timeout_ms, libp2p_relay_v2_reservation_t *out);
 
+/* Reserve a slot on a relay and optionally keep the stream alive.
+ * If out_stream is non-NULL and reservation succeeds, the stream is returned
+ * and the caller takes ownership (must call libp2p_stream_close/free when done).
+ * Keeping the stream alive maintains the muxed connection for reuse.
+ */
+int libp2p_relay_v2_reserve_keep_stream(libp2p_host_t *host, const char *relay_multiaddr, int timeout_ms, 
+                                         libp2p_relay_v2_reservation_t *out, libp2p_stream_t **out_stream);
+
 /* Build a relay circuit multiaddr of the form:
  *   <relay_multiaddr>/p2p-circuit/p2p/<self_peer_id>
  * Caller must free *out_addr with free().

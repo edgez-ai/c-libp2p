@@ -636,6 +636,12 @@ static int relay_status_to_err(libp2p_relay_v2_status_t st)
 
 int libp2p_relay_v2_reserve(libp2p_host_t *host, const char *relay_multiaddr, int timeout_ms, libp2p_relay_v2_reservation_t *out)
 {
+    return libp2p_relay_v2_reserve_keep_stream(host, relay_multiaddr, timeout_ms, out, NULL);
+}
+
+int libp2p_relay_v2_reserve_keep_stream(libp2p_host_t *host, const char *relay_multiaddr, int timeout_ms, 
+                                         libp2p_relay_v2_reservation_t *out, libp2p_stream_t **out_stream)
+{
     if (!host || !relay_multiaddr)
         return LIBP2P_ERR_NULL_PTR;
 
@@ -689,10 +695,20 @@ int libp2p_relay_v2_reserve(libp2p_host_t *host, const char *relay_multiaddr, in
         out->limit_data_bytes = hmsg.limit_data;
     }
 
-    libp2p_stream_close(s);
-    libp2p_stream_free(s);
+    int result = relay_status_to_err((libp2p_relay_v2_status_t)hmsg.status);
+    
+    /* If caller wants to keep the stream and reservation succeeded, return it */
+    if (out_stream && result == 0)
+    {
+        *out_stream = s;
+    }
+    else
+    {
+        libp2p_stream_close(s);
+        libp2p_stream_free(s);
+    }
 
-    return relay_status_to_err((libp2p_relay_v2_status_t)hmsg.status);
+    return result;
 }
 
 int libp2p_relay_v2_build_circuit_addr(const char *relay_multiaddr, const peer_id_t *self, char **out_addr)
