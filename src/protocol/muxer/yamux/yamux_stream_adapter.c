@@ -1,5 +1,6 @@
 #include "libp2p/stream_internal.h"
 #include "libp2p/debug_trace.h"
+#include "libp2p/log.h"
 #include "protocol/muxer/yamux/protocol_yamux.h"
 #include <pthread.h>
 #include <stdatomic.h>
@@ -21,16 +22,24 @@ static ssize_t yst_read(void *io_ctx, void *buf, size_t len)
     switch (rc)
     {
         case LIBP2P_YAMUX_OK:
+            if (out == 0) {
+                /* This shouldn't happen - OK with 0 bytes is unusual */
+                LP_LOGW("YAMUX", "yst_read id=%u: OK but out=0, treating as AGAIN", x->id);
+                return LIBP2P_ERR_AGAIN;
+            }
             return (ssize_t)out;
         case LIBP2P_YAMUX_ERR_AGAIN:
             return LIBP2P_ERR_AGAIN;
         case LIBP2P_YAMUX_ERR_TIMEOUT:
             return LIBP2P_ERR_TIMEOUT;
         case LIBP2P_YAMUX_ERR_EOF:
-            return 0;
+            LP_LOGD("YAMUX", "yst_read id=%u: returning EOF", x->id);
+            return LIBP2P_ERR_EOF;
         case LIBP2P_YAMUX_ERR_RESET:
-            return 0;
+            LP_LOGD("YAMUX", "yst_read id=%u: returning RESET", x->id);
+            return LIBP2P_ERR_RESET;
         default:
+            LP_LOGW("YAMUX", "yst_read id=%u: unknown rc=%d, returning INTERNAL", x->id, (int)rc);
             return LIBP2P_ERR_INTERNAL;
     }
 }

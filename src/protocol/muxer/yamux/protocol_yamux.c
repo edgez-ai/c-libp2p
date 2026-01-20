@@ -943,6 +943,8 @@ libp2p_yamux_err_t libp2p_yamux_dispatch_frame(libp2p_yamux_ctx_t *ctx, const li
 
             if (fr->flags & LIBP2P_YAMUX_RST)
             {
+                LP_LOGD("YAMUX", "DATA dispatch: RST flag for stream id=%u, discarding %zu bytes in buffer", 
+                        fr->stream_id, st->buf_len > st->buf_pos ? st->buf_len - st->buf_pos : 0);
                 if (st->initiator && !st->acked && ctx->ack_backlog > 0)
                     ctx->ack_backlog--;
                 st->reset = 1;
@@ -955,8 +957,11 @@ libp2p_yamux_err_t libp2p_yamux_dispatch_frame(libp2p_yamux_ctx_t *ctx, const li
                 break;
             }
 
-            if (fr->flags & LIBP2P_YAMUX_FIN)
+            if (fr->flags & LIBP2P_YAMUX_FIN) {
+                LP_LOGD("YAMUX", "DATA dispatch: FIN flag for stream id=%u, data_len=%u, buf has %zu unread", 
+                        fr->stream_id, fr->data_len, st->buf_len > st->buf_pos ? st->buf_len - st->buf_pos : 0);
                 st->remote_closed = 1;
+            }
 
             if (fr->data_len)
             {
@@ -1221,6 +1226,7 @@ libp2p_yamux_err_t libp2p_yamux_stream_recv(libp2p_yamux_ctx_t *ctx, uint32_t id
     }
     if (st->reset)
     {
+        LP_LOGD("YAMUX", "stream_recv id=%u returning RESET", id);
         maybe_cleanup_stream(ctx, idx);
         pthread_mutex_unlock(&ctx->mtx);
         *out_len = 0;
@@ -1230,6 +1236,7 @@ libp2p_yamux_err_t libp2p_yamux_stream_recv(libp2p_yamux_ctx_t *ctx, uint32_t id
     {
         if (st->remote_closed)
         {
+            LP_LOGD("YAMUX", "stream_recv id=%u returning EOF (buf empty, remote_closed=1)", id);
             maybe_cleanup_stream(ctx, idx);
             pthread_mutex_unlock(&ctx->mtx);
             *out_len = 0;

@@ -1904,6 +1904,29 @@ int libp2p_host_open_stream(libp2p_host_t *host, const peer_id_t *peer, const ch
         char *maddr = multiaddr_to_str(addrs[i], &serr);
         if (!maddr)
             continue;
+        
+        /* Append /p2p/<peer-id> suffix if not present, to enable session reuse */
+        char *maddr_with_peer = maddr;
+        if (!strstr(maddr, "/p2p/") && !strstr(maddr, "/ipfs/"))
+        {
+            char peer_str[128] = {0};
+            if (peer_id_to_string(peer, PEER_ID_FMT_BASE58_LEGACY, peer_str, sizeof(peer_str)) == PEER_ID_SUCCESS && peer_str[0])
+            {
+                size_t new_len = strlen(maddr) + 5 + strlen(peer_str) + 1;
+                maddr_with_peer = (char *)malloc(new_len);
+                if (maddr_with_peer)
+                {
+                    snprintf(maddr_with_peer, new_len, "%s/p2p/%s", maddr, peer_str);
+                    free(maddr);
+                    maddr = maddr_with_peer;
+                }
+                else
+                {
+                    maddr_with_peer = maddr;
+                }
+            }
+        }
+        
         rc = libp2p_host_dial_selected_blocking(host, maddr, &sel, host->opts.dial_timeout_ms, &s);
         free(maddr);
         if (rc == 0 && s)

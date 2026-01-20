@@ -796,6 +796,17 @@ static int read_lp_message(libp2p_stream_t *s, uint8_t *buf, size_t buf_size, si
             continue;
         }
         
+        /* Check for EOF (0 or -3 depending on code path) */
+        if (got == 0 || got == LIBP2P_ERR_EOF) {
+            fprintf(stderr, "[AUTONAT-V2] read_lp_message: len byte %zu EOF (got=%zd, stream closed by remote, EAGAIN count was %d)\n", 
+                    len_bytes, got, eagain_count);
+            return -1;
+        }
+        if (got == LIBP2P_ERR_RESET) {
+            fprintf(stderr, "[AUTONAT-V2] read_lp_message: len byte %zu RESET (stream reset by remote)\n", len_bytes);
+            return -1;
+        }
+        
         /* Fatal error */
         fprintf(stderr, "[AUTONAT-V2] read_lp_message: len byte %zu read failed, got=%zd (EAGAIN count was %d)\n", 
                 len_bytes, got, eagain_count);
@@ -1669,10 +1680,19 @@ static void *autonat_v2_probe_thread(void *arg)
                 fprintf(stderr, "[AUTONAT-V2] have %zu addresses to test\n", num_addrs);
                 
                 /* Try to probe each peer until we get enough confirmations */
+                int probes_this_cycle = 0;
+                const int max_probes_per_cycle = 3; /* Limit probes to avoid spamming */
+                
                 for (size_t i = 0; i < num_peers && !svc->stop_requested; i++) {
                     /* Skip if we already have enough confirmations */
                     if (svc->success_count >= svc->opts.min_confirmations)
                         break;
+                    
+                    /* Limit probes per cycle to avoid spamming */
+                    if (probes_this_cycle >= max_probes_per_cycle) {
+                        fprintf(stderr, "[AUTONAT-V2] reached max probes per cycle (%d)\n", max_probes_per_cycle);
+                        break;
+                    }
                     
                     /* Get peer's address from peerstore */
                     const multiaddr_t **peer_addrs = NULL;
@@ -1689,6 +1709,8 @@ static void *autonat_v2_probe_thread(void *arg)
                             libp2p_autonat_dial_result_t result = {0};
                             probe_peer_v2(svc, peers[i], peer_addr, 
                                          (const char *const *)our_addrs, num_addrs, &result);
+                            
+                            probes_this_cycle++;
                             
                             if (result.status == LIBP2P_AUTONAT_STATUS_OK) {
                                 pthread_mutex_lock(&svc->mtx);
@@ -1710,6 +1732,11 @@ static void *autonat_v2_probe_thread(void *arg)
                             free(result.status_text);
                             free(result.addr);
                             free(peer_addr);
+                            
+                            /* Small delay between probes to avoid spamming */
+                            if (i + 1 < num_peers && probes_this_cycle < max_probes_per_cycle) {
+                                sleep(2); /* 2 second delay between probes */
+                            }
                         }
                         libp2p_peerstore_free_addrs(peer_addrs, peer_num_addrs);
                     }
