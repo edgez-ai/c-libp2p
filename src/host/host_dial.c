@@ -1881,22 +1881,10 @@ int libp2p_host_open_stream(libp2p_host_t *host, const peer_id_t *peer, const ch
             schedule_dial_on_open(host, on_open, NULL, user_data, LIBP2P_ERR_NULL_PTR);
         return LIBP2P_ERR_NULL_PTR;
     }
-    if (!host->peerstore)
-    {
-        if (on_open)
-            schedule_dial_on_open(host, on_open, NULL, user_data, LIBP2P_ERR_INTERNAL);
-        return LIBP2P_ERR_INTERNAL;
-    }
-    const multiaddr_t **addrs = NULL;
-    size_t n = 0;
-    if (libp2p_peerstore_get_addrs(host->peerstore, peer, &addrs, &n) != 0 || n == 0)
-    {
-        if (on_open)
-            schedule_dial_on_open(host, on_open, NULL, user_data, LIBP2P_ERR_INTERNAL);
-        return LIBP2P_ERR_INTERNAL;
-    }
+    
     libp2p_stream_t *s = NULL;
     int rc = LIBP2P_ERR_INTERNAL;
+    
     /* Build EXACT selector for target protocol */
     libp2p_proto_selector_t sel = {
         .kind = LIBP2P_PROTO_SELECT_EXACT,
@@ -1907,6 +1895,101 @@ int libp2p_host_open_stream(libp2p_host_t *host, const peer_id_t *peer, const ch
         .base_path = NULL,
         .semver_range = NULL,
     };
+    
+    /* Fast path: Try to reuse existing session with this peer */
+    {
+        char peer_str[128] = {0};
+        peer_id_to_string(peer, PEER_ID_FMT_BASE58_LEGACY, peer_str, sizeof(peer_str));
+        fprintf(stderr, "[HOST OPEN_STREAM] looking for existing session with peer=%s\n", peer_str);
+        
+        libp2p_muxer_t *mx = NULL;
+        peer_id_t *peer_copy = NULL;
+        pthread_mutex_lock(&host->mtx);
+        for (session_node_t *sess = host->sessions; sess; sess = sess->next)
+        {
+            if (!sess->mx || !sess->mx->vt || !sess->mx->vt->open_stream)
+                continue;
+            if (!sess->remote_peer || !sess->remote_peer->bytes || !peer->bytes)
+                continue;
+            if (sess->remote_peer->size != peer->size)
+                continue;
+            if (memcmp(sess->remote_peer->bytes, peer->bytes, peer->size) != 0)
+                continue;
+            /* Found a matching session */
+            mx = sess->mx;
+            peer_copy = peer_id_dup(sess->remote_peer);
+            break;
+        }
+        pthread_mutex_unlock(&host->mtx);
+        
+        if (mx)
+        {
+            fprintf(stderr, "[HOST OPEN_STREAM] found existing session, opening stream\n");
+            muxer_err_t mxerr = mx->vt->open_stream(mx, &s);
+            fprintf(stderr, "[HOST OPEN_STREAM] open_stream returned %d, s=%p\n", (int)mxerr, (void*)s);
+            if (mxerr == MUXER_ERR_OK && s)
+            {
+                /* Run multiselect to negotiate protocol */
+                const char *proposals[] = {protocol_id, NULL};
+                libp2p_io_t *io = libp2p_io_from_stream(s);
+                if (io)
+                {
+                    const char *accepted = NULL;
+                    libp2p_multiselect_err_t ms = libp2p_multiselect_dial_io(
+                        io, proposals, host->opts.multiselect_handshake_timeout_ms, &accepted);
+                    fprintf(stderr, "[HOST OPEN_STREAM] multiselect returned %d, accepted=%s\n", 
+                            (int)ms, accepted ? accepted : "(null)");
+                    libp2p_io_free(io);
+                    
+                    if (ms == LIBP2P_MULTISELECT_OK && accepted)
+                    {
+                        free((void*)accepted);
+                        if (peer_copy)
+                        {
+                            if (libp2p_stream_set_remote_peer(s, peer_copy) != 0)
+                            {
+                                peer_id_destroy(peer_copy);
+                                free(peer_copy);
+                            }
+                            peer_copy = NULL;
+                        }
+                        fprintf(stderr, "[HOST OPEN_STREAM] SUCCESS reused existing session for peer=%s\n", peer_str);
+                        if (on_open)
+                            schedule_dial_on_open(host, on_open, s, user_data, 0);
+                        return 0;
+                    }
+                    if (accepted)
+                        free((void*)accepted);
+                }
+                libp2p_stream_close(s);
+                libp2p_stream_free(s);
+                s = NULL;
+            }
+            if (peer_copy)
+            {
+                peer_id_destroy(peer_copy);
+                free(peer_copy);
+            }
+        }
+    }
+    
+    /* Fallback: Try addresses from peerstore */
+    if (!host->peerstore)
+    {
+        if (on_open)
+            schedule_dial_on_open(host, on_open, NULL, user_data, LIBP2P_ERR_INTERNAL);
+        return LIBP2P_ERR_INTERNAL;
+    }
+    const multiaddr_t **addrs = NULL;
+    size_t n = 0;
+    if (libp2p_peerstore_get_addrs(host->peerstore, peer, &addrs, &n) != 0 || n == 0)
+    {
+        fprintf(stderr, "[HOST OPEN_STREAM] no addresses in peerstore for peer\n");
+        if (on_open)
+            schedule_dial_on_open(host, on_open, NULL, user_data, LIBP2P_ERR_INTERNAL);
+        return LIBP2P_ERR_INTERNAL;
+    }
+    
     for (size_t i = 0; i < n; i++)
     {
         int serr = 0;
