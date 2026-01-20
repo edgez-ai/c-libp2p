@@ -1925,9 +1925,9 @@ int libp2p_host_open_stream(libp2p_host_t *host, const peer_id_t *peer, const ch
         if (mx)
         {
             fprintf(stderr, "[HOST OPEN_STREAM] found existing session, opening stream\n");
-            muxer_err_t mxerr = mx->vt->open_stream(mx, &s);
+            libp2p_muxer_err_t mxerr = mx->vt->open_stream(mx, NULL, 0, &s);
             fprintf(stderr, "[HOST OPEN_STREAM] open_stream returned %d, s=%p\n", (int)mxerr, (void*)s);
-            if (mxerr == MUXER_ERR_OK && s)
+            if (mxerr == LIBP2P_MUXER_OK && s)
             {
                 /* Run multiselect to negotiate protocol */
                 const char *proposals[] = {protocol_id, NULL};
