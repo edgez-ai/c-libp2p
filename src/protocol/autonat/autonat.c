@@ -1343,21 +1343,21 @@ static int probe_peer_v2(libp2p_autonat_service_t *svc, const peer_id_t *peer,
         fprintf(stderr, "[AUTONAT-V2] dial-back received! addr=%s reachable\n",
                 pdb->received_addr ? pdb->received_addr : "?");
         
-        result->status = LIBP2P_AUTONAT_STATUS_PUBLIC;
+        result->status = LIBP2P_AUTONAT_STATUS_OK;
         result->status_text = strdup("reachable");
         if (dr.addr_idx < num_addrs) {
-            result->reachable_addr = strdup(our_addrs[dr.addr_idx]);
+            result->addr = strdup(our_addrs[dr.addr_idx]);
         } else if (pdb->received_addr) {
-            result->reachable_addr = strdup(pdb->received_addr);
+            result->addr = strdup(pdb->received_addr);
         }
     } else {
         /* Server refused or failed */
         fprintf(stderr, "[AUTONAT-V2] server declined dial: status=%d\n", dr.status);
-        result->status = LIBP2P_AUTONAT_STATUS_PRIVATE;
+        result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_REFUSED;
         if (dr.status == AUTONAT_V2_RESPONSE_E_DIAL_REFUSED) {
             result->status_text = strdup("dial refused");
-        } else if (dr.status == AUTONAT_V2_RESPONSE_E_DIAL_ERROR) {
-            result->status_text = strdup("dial error");
+        } else if (dr.status == AUTONAT_V2_RESPONSE_E_REQUEST_REJECTED) {
+            result->status_text = strdup("request rejected");
         } else if (dr.status == AUTONAT_V2_RESPONSE_E_INTERNAL_ERROR) {
             result->status_text = strdup("internal error");
         } else {
