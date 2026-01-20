@@ -736,10 +736,14 @@ static char *extract_ip_from_addr(const char *addr)
 /* Read length-prefixed message from stream */
 static int read_lp_message(libp2p_stream_t *s, uint8_t *buf, size_t buf_size, size_t *out_len, int timeout_ms)
 {
-    if (!s || !buf || !out_len) return -1;
+    if (!s || !buf || !out_len) {
+        fprintf(stderr, "[AUTONAT-V2] read_lp_message: null params\n");
+        return -1;
+    }
     
     /* Set deadline for read operations */
-    libp2p_stream_set_deadline(s, (uint64_t)timeout_ms);
+    int rc = libp2p_stream_set_deadline(s, (uint64_t)timeout_ms);
+    fprintf(stderr, "[AUTONAT-V2] read_lp_message: set deadline %d ms, rc=%d\n", timeout_ms, rc);
     
     /* Read length prefix */
     uint8_t len_buf[10];
@@ -748,51 +752,80 @@ static int read_lp_message(libp2p_stream_t *s, uint8_t *buf, size_t buf_size, si
     
     for (int i = 0; i < 10; i++) {
         ssize_t got = libp2p_stream_read(s, len_buf + i, 1);
-        if (got != 1) return -1;
+        if (got != 1) {
+            fprintf(stderr, "[AUTONAT-V2] read_lp_message: len byte %d read failed, got=%zd\n", i, got);
+            return -1;
+        }
         len_bytes++;
         
         if ((len_buf[i] & 0x80) == 0) {
             size_t off = 0;
-            if (pb_read_varint(len_buf, len_bytes, &off, &msg_len) != 0) return -1;
+            if (pb_read_varint(len_buf, len_bytes, &off, &msg_len) != 0) {
+                fprintf(stderr, "[AUTONAT-V2] read_lp_message: varint parse failed\n");
+                return -1;
+            }
             break;
         }
     }
     
-    if (msg_len == 0 || msg_len > buf_size) return -1;
+    fprintf(stderr, "[AUTONAT-V2] read_lp_message: msg_len=%llu\n", (unsigned long long)msg_len);
+    
+    if (msg_len == 0 || msg_len > buf_size) {
+        fprintf(stderr, "[AUTONAT-V2] read_lp_message: invalid msg_len=%llu (buf_size=%zu)\n", 
+                (unsigned long long)msg_len, buf_size);
+        return -1;
+    }
     
     /* Read message body */
     size_t total = 0;
     while (total < msg_len) {
         ssize_t got = libp2p_stream_read(s, buf + total, msg_len - total);
-        if (got <= 0) return -1;
+        if (got <= 0) {
+            fprintf(stderr, "[AUTONAT-V2] read_lp_message: body read failed at %zu/%llu, got=%zd\n",
+                    total, (unsigned long long)msg_len, got);
+            return -1;
+        }
         total += (size_t)got;
     }
     
     *out_len = (size_t)msg_len;
+    fprintf(stderr, "[AUTONAT-V2] read_lp_message: success, read %zu bytes\n", total);
     return 0;
 }
 
 /* Write length-prefixed message to stream */
 static int write_lp_message(libp2p_stream_t *s, const uint8_t *buf, size_t len)
 {
-    if (!s || !buf) return -1;
+    if (!s || !buf) {
+        fprintf(stderr, "[AUTONAT-V2] write_lp_message: null params\n");
+        return -1;
+    }
     
     /* Encode length prefix */
     uint8_t len_buf[10];
     size_t len_bytes = 0;
-    if (unsigned_varint_encode((uint64_t)len, len_buf, sizeof(len_buf), &len_bytes) != UNSIGNED_VARINT_OK)
+    if (unsigned_varint_encode((uint64_t)len, len_buf, sizeof(len_buf), &len_bytes) != UNSIGNED_VARINT_OK) {
+        fprintf(stderr, "[AUTONAT-V2] write_lp_message: varint encode failed\n");
         return -1;
+    }
+    
+    fprintf(stderr, "[AUTONAT-V2] write_lp_message: writing %zu bytes (prefix=%zu)\n", len, len_bytes);
     
     /* Write length */
     ssize_t written = libp2p_stream_write(s, len_buf, len_bytes);
-    if (written < 0 || (size_t)written != len_bytes)
+    if (written < 0 || (size_t)written != len_bytes) {
+        fprintf(stderr, "[AUTONAT-V2] write_lp_message: prefix write failed, written=%zd\n", written);
         return -1;
+    }
     
     /* Write body */
     written = libp2p_stream_write(s, buf, len);
-    if (written < 0 || (size_t)written != len)
+    if (written < 0 || (size_t)written != len) {
+        fprintf(stderr, "[AUTONAT-V2] write_lp_message: body write failed, written=%zd\n", written);
         return -1;
+    }
     
+    fprintf(stderr, "[AUTONAT-V2] write_lp_message: success\n");
     return 0;
 }
 
