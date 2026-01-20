@@ -141,6 +141,10 @@ static void event_deep_copy(libp2p_event_t *dst, const libp2p_event_t *src)
             if (src->u.error.msg)
                 dst->u.error.msg = strdup(src->u.error.msg);
             break;
+        case LIBP2P_EVT_RELAY_CONN_ACCEPTED:
+            if (src->u.relay_conn_accepted.peer)
+                dst->u.relay_conn_accepted.peer = peer_id__clone(src->u.relay_conn_accepted.peer);
+            break;
         default:
             break;
     }
@@ -683,6 +687,14 @@ void libp2p_event_free(libp2p_event_t *evt)
         case LIBP2P_EVT_ERROR:
             free((void *)evt->u.error.msg);
             evt->u.error.msg = NULL;
+            break;
+        case LIBP2P_EVT_RELAY_CONN_ACCEPTED:
+            if (evt->u.relay_conn_accepted.peer)
+            {
+                peer_id_destroy((peer_id_t *)evt->u.relay_conn_accepted.peer);
+                free((void *)evt->u.relay_conn_accepted.peer);
+                evt->u.relay_conn_accepted.peer = NULL;
+            }
             break;
         default:
             break;
