@@ -204,23 +204,17 @@ static int encode_dcutr_message(pb_buf_t *out, libp2p_dcutr_msg_type_t type,
         multiaddr_t *ma = multiaddr_new_from_str(addrs[i], &ma_err);
         if (!ma)
             continue;
-        size_t blen = 0;
-        uint8_t *bytes = multiaddr_to_bytes(ma, &blen, &ma_err);
+        /* Get the multiaddr bytes using proper API */
+        uint8_t ma_bytes[256];
+        int blen = multiaddr_get_bytes(ma, ma_bytes, sizeof(ma_bytes));
         multiaddr_free(ma);
-        if (bytes && blen > 0)
+        if (blen > 0)
         {
             if (pb_buf_append_key(out, 2, 2) != 0)
-            {
-                free(bytes);
                 return -1;
-            }
-            if (pb_buf_append_bytes(out, bytes, blen) != 0)
-            {
-                free(bytes);
+            if (pb_buf_append_bytes(out, ma_bytes, (size_t)blen) != 0)
                 return -1;
-            }
         }
-        free(bytes);
     }
     return 0;
 }

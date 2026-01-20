@@ -233,18 +233,13 @@ static int encode_peer_info(pb_buf_t *out, const peer_id_t *peer, const char *co
     if (!out)
         return -1;
 
-    /* Encode peer ID (field 1, bytes) */
-    if (peer)
+    /* Encode peer ID (field 1, bytes) - peer_id_t already has the raw bytes */
+    if (peer && peer->bytes && peer->size > 0)
     {
-        uint8_t peer_bytes[64];
-        ssize_t peer_len = peer_id_to_bytes(peer, peer_bytes, sizeof(peer_bytes));
-        if (peer_len > 0)
-        {
-            if (pb_buf_append_key(out, 1, 2) != 0)
-                return -1;
-            if (pb_buf_append_bytes(out, peer_bytes, (size_t)peer_len) != 0)
-                return -1;
-        }
+        if (pb_buf_append_key(out, 1, 2) != 0)
+            return -1;
+        if (pb_buf_append_bytes(out, peer->bytes, peer->size) != 0)
+            return -1;
     }
 
     /* Encode addresses (field 2, bytes, repeated) */
@@ -256,23 +251,17 @@ static int encode_peer_info(pb_buf_t *out, const peer_id_t *peer, const char *co
         multiaddr_t *ma = multiaddr_new_from_str(addrs[i], &ma_err);
         if (!ma)
             continue;
-        size_t blen = 0;
-        uint8_t *bytes = multiaddr_to_bytes(ma, &blen, &ma_err);
+        /* Get the multiaddr bytes using proper API */
+        uint8_t ma_bytes[256];
+        int blen = multiaddr_get_bytes(ma, ma_bytes, sizeof(ma_bytes));
         multiaddr_free(ma);
-        if (bytes && blen > 0)
+        if (blen > 0)
         {
             if (pb_buf_append_key(out, 2, 2) != 0)
-            {
-                free(bytes);
                 return -1;
-            }
-            if (pb_buf_append_bytes(out, bytes, blen) != 0)
-            {
-                free(bytes);
+            if (pb_buf_append_bytes(out, ma_bytes, (size_t)blen) != 0)
                 return -1;
-            }
         }
-        free(bytes);
     }
     return 0;
 }
@@ -747,7 +736,7 @@ static int check_throttle(libp2p_autonat_service_t *svc, const peer_id_t *peer)
     throttle_entry_t *te = svc->peer_throttle;
     while (te)
     {
-        if (peer_id_equal(&te->peer, peer))
+        if (peer_id_equals(&te->peer, peer) == 1)
         {
             if (now >= te->reset_time)
             {
@@ -767,7 +756,11 @@ static int check_throttle(libp2p_autonat_service_t *svc, const peer_id_t *peer)
     te = (throttle_entry_t *)calloc(1, sizeof(*te));
     if (!te)
         return 0;
-    peer_id_copy(&te->peer, peer);
+    /* Copy peer_id manually since peer_id_copy doesn't exist */
+    te->peer.size = peer->size;
+    te->peer.bytes = (uint8_t *)malloc(peer->size);
+    if (te->peer.bytes)
+        memcpy(te->peer.bytes, peer->bytes, peer->size);
     te->count = 1;
     te->reset_time = now + (uint64_t)svc->opts.throttle_interval_ms;
     te->next = svc->peer_throttle;
@@ -1306,7 +1299,7 @@ void libp2p_autonat_free(libp2p_autonat_service_t *svc)
     while (te)
     {
         throttle_entry_t *next = te->next;
-        peer_id_free_fields(&te->peer);
+        peer_id_destroy(&te->peer);
         free(te);
         te = next;
     }
@@ -1404,7 +1397,7 @@ int libp2p_autonat_probe_peer(libp2p_autonat_service_t *svc, const peer_id_t *pe
         /* Try to get from peerstore */
         if (svc->host->peerstore)
         {
-            const multiaddr_t *const *ps_addrs = NULL;
+            const multiaddr_t **ps_addrs = NULL;
             size_t ps_num = 0;
             if (libp2p_peerstore_get_addrs(svc->host->peerstore, peer, &ps_addrs, &ps_num) == 0 && ps_num > 0)
             {
