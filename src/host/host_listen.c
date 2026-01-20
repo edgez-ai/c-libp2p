@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "host_internal.h"
 #include "proto_select_internal.h"
@@ -654,45 +655,116 @@ static void *inbound_session_thread(void *arg)
         pthread_mutex_unlock(&ictx->snode->ready_mtx);
     }
 
-    /* Kick once in case data already queued */
-    inbound_yamux_on_io(fd, 0x1, cbctx);
-
-    /* Runtime timers available if needed */
-
-    /* Inbound auto-identify when enabled */
-    if (remote_peer && host->opts.flags & LIBP2P_HOST_F_AUTO_IDENTIFY_INBOUND)
+    /* For connections without a pollable fd (e.g., relay connections), run a
+     * polling loop instead of using the event-driven runtime. */
+    if (fd < 0)
     {
-        aid_ctx_t *c = (aid_ctx_t *)calloc(1, sizeof(*c));
-        if (c)
+        LP_LOGI("HOST", "inbound session: no fd available, using polling loop for yamux");
+        atomic_store_explicit(&yctx->loop_active, true, memory_order_release);
+        while (!atomic_load_explicit(&yctx->stop, memory_order_acquire))
         {
-            c->host = host;
-            c->yctx = yctx;
-            c->peer.bytes = (uint8_t *)malloc(remote_peer->size);
-            if (c->peer.bytes)
+            /* Process yamux frames */
+            libp2p_yamux_err_t rc = libp2p_yamux_process_one(yctx);
+            if (rc != LIBP2P_YAMUX_OK && rc != LIBP2P_YAMUX_ERR_AGAIN)
             {
-                memcpy(c->peer.bytes, remote_peer->bytes, remote_peer->size);
-                c->peer.size = remote_peer->size;
+                LP_LOGD("HOST", "inbound session poll: yamux error rc=%d", (int)rc);
+                break;
+            }
+
+            /* Accept and dispatch inbound substreams */
+            for (;;)
+            {
+                libp2p_yamux_stream_t *yst = NULL;
+                if (libp2p_yamux_accept_stream(yctx, &yst) != LIBP2P_YAMUX_OK || !yst)
+                    break;
+
+                uint32_t sid = yst->id;
+                LP_LOGD("HOST", "inbound session poll: accepted substream id=%u", sid);
+
+                /* Enforce per-connection inbound streams cap if configured */
+                if (host && host->opts.per_conn_max_inbound_streams > 0 &&
+                    cbctx->accepted_count >= host->opts.per_conn_max_inbound_streams)
+                {
+                    (void)libp2p_yamux_close_stream(yctx->conn, sid);
+                    continue;
+                }
+
+                /* Handle substream in a detached worker */
+                typedef struct
+                {
+                    yamux_cb_ctx_t *ctx;
+                    uint32_t sid;
+                    int heap;
+                } sub_work_t;
+                sub_work_t *work = (sub_work_t *)calloc(1, sizeof(*work));
+                if (!work)
+                    continue;
+                work->ctx = cbctx;
+                work->sid = sid;
+                work->heap = 1;
                 pthread_t th;
                 if (host)
                     libp2p__worker_inc(host);
-                if (pthread_create(&th, NULL, aid_thread, c) == 0)
+                if (pthread_create(&th, NULL, inbound_substream_worker, work) == 0)
+                {
                     pthread_detach(th);
+                    cbctx->accepted_count++;
+                }
                 else
                 {
                     if (host)
                         libp2p__worker_dec(host);
-                    peer_id_destroy(&c->peer);
+                    free(work);
+                }
+            }
+
+            /* Brief sleep to avoid busy-spinning */
+            usleep(1000); /* 1ms */
+        }
+        atomic_store_explicit(&yctx->loop_active, false, memory_order_release);
+    }
+    else
+    {
+        /* Kick once in case data already queued */
+        inbound_yamux_on_io(fd, 0x1, cbctx);
+
+        /* Runtime timers available if needed */
+
+        /* Inbound auto-identify when enabled */
+        if (remote_peer && host->opts.flags & LIBP2P_HOST_F_AUTO_IDENTIFY_INBOUND)
+        {
+            aid_ctx_t *c = (aid_ctx_t *)calloc(1, sizeof(*c));
+            if (c)
+            {
+                c->host = host;
+                c->yctx = yctx;
+                c->peer.bytes = (uint8_t *)malloc(remote_peer->size);
+                if (c->peer.bytes)
+                {
+                    memcpy(c->peer.bytes, remote_peer->bytes, remote_peer->size);
+                    c->peer.size = remote_peer->size;
+                    pthread_t th;
+                    if (host)
+                        libp2p__worker_inc(host);
+                    if (pthread_create(&th, NULL, aid_thread, c) == 0)
+                        pthread_detach(th);
+                    else
+                    {
+                        if (host)
+                            libp2p__worker_dec(host);
+                        peer_id_destroy(&c->peer);
+                        free(c);
+                    }
+                }
+                else
+                {
                     free(c);
                 }
             }
-            else
-            {
-                free(c);
-            }
         }
-    }
 
-    (void)libp2p_runtime_run(rt);
+        (void)libp2p_runtime_run(rt);
+    }
 
     /* Note: cbctx (and its streams list) is intentionally kept alive to avoid
      * races with detached substream workers still referencing it. It will be
