@@ -1014,6 +1014,33 @@ static void on_dial_request_stream(libp2p_stream_t *s, void *user_data)
 
 /* ----------------------- client probing ----------------------- */
 
+/* Context for blocking stream open */
+typedef struct {
+    libp2p_stream_t *stream;
+    int err;
+    pthread_mutex_t mtx;
+    pthread_cond_t cv;
+    int done;
+} probe_open_ctx_t;
+
+/* Callback for blocking stream open */
+static void probe_on_stream_opened(libp2p_stream_t *s, void *ud, int err) {
+    probe_open_ctx_t *ctx = (probe_open_ctx_t *)ud;
+    if (!ctx) {
+        if (s) {
+            libp2p_stream_close(s);
+            libp2p_stream_free(s);
+        }
+        return;
+    }
+    pthread_mutex_lock(&ctx->mtx);
+    ctx->stream = s;
+    ctx->err = err;
+    ctx->done = 1;
+    pthread_cond_signal(&ctx->cv);
+    pthread_mutex_unlock(&ctx->mtx);
+}
+
 /* Probe a specific peer for reachability */
 static int probe_peer_v2(libp2p_autonat_service_t *svc, const peer_id_t *peer, 
                           const char *peer_addr, const char *const *our_addrs, 
@@ -1082,21 +1109,262 @@ static int probe_peer_v2(libp2p_autonat_service_t *svc, const peer_id_t *peer,
         }
     }
     
-    fprintf(stderr, "[AUTONAT-V2] peer supports autonat v2, but async stream open not yet implemented\n");
+    fprintf(stderr, "[AUTONAT-V2] opening stream to peer for dial-request\n");
     
-    /* TODO: Implement actual stream open and message exchange:
-     * 1. libp2p_host_open_stream_async() to peer with AUTONAT_V2_DIAL_REQUEST_PROTO
-     * 2. In on_open callback, write the DialRequest message
-     * 3. Read DialResponse (may include DialDataRequest first for amplification prevention)
-     * 4. Meanwhile, wait for dial-back on pdb->cv with timeout
-     * 5. If dial-back received with matching nonce, address is reachable
-     */
+    /* Open stream to peer (blocking - we're in probe thread) */
+    libp2p_stream_t *stream = NULL;
     
-    result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
-    result->status_text = strdup("stream open not yet implemented");
+    /* Use callback context for blocking open */
+    probe_open_ctx_t octx = {0};
+    pthread_mutex_init(&octx.mtx, NULL);
+    pthread_cond_init(&octx.cv, NULL);
     
+    int open_rc = libp2p_host_open_stream(svc->host, peer, AUTONAT_V2_DIAL_REQUEST_PROTO, 
+                                           probe_on_stream_opened, &octx);
+    if (open_rc != 0) {
+        fprintf(stderr, "[AUTONAT-V2] failed to initiate stream open: %d\n", open_rc);
+        result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
+        result->status_text = strdup("failed to open stream");
+        free(msg.buf);
+        pthread_mutex_destroy(&octx.mtx);
+        pthread_cond_destroy(&octx.cv);
+        goto cleanup;
+    }
+    
+    /* Wait for stream open with timeout */
+    struct timespec open_deadline;
+    clock_gettime(CLOCK_REALTIME, &open_deadline);
+    open_deadline.tv_sec += 10;
+    
+    pthread_mutex_lock(&octx.mtx);
+    while (!octx.done) {
+        if (pthread_cond_timedwait(&octx.cv, &octx.mtx, &open_deadline) == ETIMEDOUT) {
+            pthread_mutex_unlock(&octx.mtx);
+            fprintf(stderr, "[AUTONAT-V2] stream open timed out\n");
+            result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
+            result->status_text = strdup("stream open timeout");
+            free(msg.buf);
+            pthread_mutex_destroy(&octx.mtx);
+            pthread_cond_destroy(&octx.cv);
+            goto cleanup;
+        }
+    }
+    stream = octx.stream;
+    int stream_err = octx.err;
+    pthread_mutex_unlock(&octx.mtx);
+    pthread_mutex_destroy(&octx.mtx);
+    pthread_cond_destroy(&octx.cv);
+    
+    if (stream_err != 0 || !stream) {
+        fprintf(stderr, "[AUTONAT-V2] stream open failed: err=%d\n", stream_err);
+        result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
+        result->status_text = strdup("stream open failed");
+        free(msg.buf);
+        if (stream) {
+            libp2p_stream_close(stream);
+            libp2p_stream_free(stream);
+        }
+        goto cleanup;
+    }
+    
+    fprintf(stderr, "[AUTONAT-V2] stream opened, sending dial-request\n");
+    
+    /* Write DialRequest message with LP framing */
+    if (write_lp_message(stream, msg.buf, msg.len) != 0) {
+        fprintf(stderr, "[AUTONAT-V2] failed to write dial-request\n");
+        result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
+        result->status_text = strdup("failed to write dial-request");
+        free(msg.buf);
+        libp2p_stream_close(stream);
+        libp2p_stream_free(stream);
+        goto cleanup;
+    }
     free(msg.buf);
+    msg.buf = NULL;
     
+    fprintf(stderr, "[AUTONAT-V2] dial-request sent, reading response\n");
+    
+    /* Read response - may be DialDataRequest or DialResponse */
+    uint8_t resp_buf[4096];
+    size_t resp_len = 0;
+    if (read_lp_message(stream, resp_buf, sizeof(resp_buf), &resp_len, 30000) != 0) {
+        fprintf(stderr, "[AUTONAT-V2] failed to read response\n");
+        result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
+        result->status_text = strdup("failed to read response");
+        libp2p_stream_close(stream);
+        libp2p_stream_free(stream);
+        goto cleanup;
+    }
+    
+    /* Parse the response wrapper */
+    int resp_type = 0;
+    const uint8_t *inner = NULL;
+    size_t inner_len = 0;
+    if (parse_message_wrapper(resp_buf, resp_len, &resp_type, &inner, &inner_len) != 0) {
+        fprintf(stderr, "[AUTONAT-V2] failed to parse response wrapper\n");
+        result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
+        result->status_text = strdup("failed to parse response");
+        libp2p_stream_close(stream);
+        libp2p_stream_free(stream);
+        goto cleanup;
+    }
+    
+    fprintf(stderr, "[AUTONAT-V2] got response type=%d\n", resp_type);
+    
+    /* Handle DialDataRequest (amplification prevention) */
+    if (resp_type == MSG_FIELD_DIAL_DATA_REQUEST) {
+        dial_data_request_t ddr = {0};
+        if (parse_dial_data_request(inner, inner_len, &ddr) != 0) {
+            fprintf(stderr, "[AUTONAT-V2] failed to parse DialDataRequest\n");
+            result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
+            result->status_text = strdup("failed to parse DialDataRequest");
+            libp2p_stream_close(stream);
+            libp2p_stream_free(stream);
+            goto cleanup;
+        }
+        
+        fprintf(stderr, "[AUTONAT-V2] got DialDataRequest: addr_idx=%u, num_bytes=%llu\n",
+                ddr.addr_idx, (unsigned long long)ddr.num_bytes);
+        
+        /* Limit response size (reasonable bound) */
+        if (ddr.num_bytes > 100000) {
+            fprintf(stderr, "[AUTONAT-V2] DialDataRequest too large: %llu\n", (unsigned long long)ddr.num_bytes);
+            result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
+            result->status_text = strdup("DialDataRequest too large");
+            libp2p_stream_close(stream);
+            libp2p_stream_free(stream);
+            goto cleanup;
+        }
+        
+        /* Send DialDataResponse with random data */
+        uint8_t *data = (uint8_t *)calloc(1, ddr.num_bytes);
+        if (!data) {
+            result->status = LIBP2P_AUTONAT_STATUS_E_INTERNAL_ERROR;
+            result->status_text = strdup("out of memory");
+            libp2p_stream_close(stream);
+            libp2p_stream_free(stream);
+            goto cleanup;
+        }
+        
+        pb_buf_t ddr_msg = {0};
+        if (encode_dial_data_response(&ddr_msg, data, ddr.num_bytes) != 0) {
+            free(data);
+            result->status = LIBP2P_AUTONAT_STATUS_E_INTERNAL_ERROR;
+            result->status_text = strdup("failed to encode DialDataResponse");
+            libp2p_stream_close(stream);
+            libp2p_stream_free(stream);
+            goto cleanup;
+        }
+        free(data);
+        
+        fprintf(stderr, "[AUTONAT-V2] sending DialDataResponse with %llu bytes\n", (unsigned long long)ddr.num_bytes);
+        
+        if (write_lp_message(stream, ddr_msg.buf, ddr_msg.len) != 0) {
+            free(ddr_msg.buf);
+            result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
+            result->status_text = strdup("failed to write DialDataResponse");
+            libp2p_stream_close(stream);
+            libp2p_stream_free(stream);
+            goto cleanup;
+        }
+        free(ddr_msg.buf);
+        
+        /* Now read the actual DialResponse */
+        if (read_lp_message(stream, resp_buf, sizeof(resp_buf), &resp_len, 30000) != 0) {
+            fprintf(stderr, "[AUTONAT-V2] failed to read DialResponse after data\n");
+            result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
+            result->status_text = strdup("failed to read DialResponse");
+            libp2p_stream_close(stream);
+            libp2p_stream_free(stream);
+            goto cleanup;
+        }
+        
+        if (parse_message_wrapper(resp_buf, resp_len, &resp_type, &inner, &inner_len) != 0) {
+            result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
+            result->status_text = strdup("failed to parse DialResponse wrapper");
+            libp2p_stream_close(stream);
+            libp2p_stream_free(stream);
+            goto cleanup;
+        }
+    }
+    
+    /* Now we should have a DialResponse */
+    if (resp_type != MSG_FIELD_DIAL_RESPONSE) {
+        fprintf(stderr, "[AUTONAT-V2] unexpected response type: %d\n", resp_type);
+        result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
+        result->status_text = strdup("unexpected response type");
+        libp2p_stream_close(stream);
+        libp2p_stream_free(stream);
+        goto cleanup;
+    }
+    
+    dial_response_t dr = {0};
+    if (parse_dial_response(inner, inner_len, &dr) != 0) {
+        fprintf(stderr, "[AUTONAT-V2] failed to parse DialResponse\n");
+        result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
+        result->status_text = strdup("failed to parse DialResponse");
+        libp2p_stream_close(stream);
+        libp2p_stream_free(stream);
+        goto cleanup;
+    }
+    
+    fprintf(stderr, "[AUTONAT-V2] got DialResponse: status=%d, addr_idx=%u, dial_status=%d\n",
+            dr.status, dr.addr_idx, dr.dial_status);
+    
+    /* Close stream - we're done with the request/response */
+    libp2p_stream_close(stream);
+    libp2p_stream_free(stream);
+    stream = NULL;
+    
+    /* Check response status */
+    if (dr.status == AUTONAT_V2_RESPONSE_OK) {
+        /* Server will attempt dial-back. Wait for it. */
+        fprintf(stderr, "[AUTONAT-V2] server accepted, waiting for dial-back (nonce=%llu)\n",
+                (unsigned long long)nonce);
+        
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += 30; /* 30 second timeout for dial-back */
+        
+        pthread_mutex_lock(&pdb->mtx);
+        while (!pdb->received) {
+            int rc = pthread_cond_timedwait(&pdb->cv, &pdb->mtx, &deadline);
+            if (rc == ETIMEDOUT) {
+                pthread_mutex_unlock(&pdb->mtx);
+                fprintf(stderr, "[AUTONAT-V2] dial-back timeout\n");
+                result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
+                result->status_text = strdup("dial-back timeout");
+                goto cleanup;
+            }
+        }
+        pthread_mutex_unlock(&pdb->mtx);
+        
+        /* Got dial-back! */
+        fprintf(stderr, "[AUTONAT-V2] dial-back received! addr=%s reachable\n",
+                pdb->received_addr ? pdb->received_addr : "?");
+        
+        result->status = LIBP2P_AUTONAT_STATUS_PUBLIC;
+        result->status_text = strdup("reachable");
+        if (dr.addr_idx < num_addrs) {
+            result->reachable_addr = strdup(our_addrs[dr.addr_idx]);
+        } else if (pdb->received_addr) {
+            result->reachable_addr = strdup(pdb->received_addr);
+        }
+    } else {
+        /* Server refused or failed */
+        fprintf(stderr, "[AUTONAT-V2] server declined dial: status=%d\n", dr.status);
+        result->status = LIBP2P_AUTONAT_STATUS_PRIVATE;
+        if (dr.status == AUTONAT_V2_RESPONSE_E_DIAL_REFUSED) {
+            result->status_text = strdup("dial refused");
+        } else if (dr.status == AUTONAT_V2_RESPONSE_E_DIAL_ERROR) {
+            result->status_text = strdup("dial error");
+        } else if (dr.status == AUTONAT_V2_RESPONSE_E_INTERNAL_ERROR) {
+            result->status_text = strdup("internal error");
+        } else {
+            result->status_text = strdup("unknown error");
+        }
+    }
+
 cleanup:
     /* Remove from pending list */
     pthread_mutex_lock(&svc->pending_mtx);
