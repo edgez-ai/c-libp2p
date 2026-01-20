@@ -747,8 +747,6 @@ static int read_lp_message(libp2p_stream_t *s, uint8_t *buf, size_t buf_size, si
     uint64_t start_ms = (uint64_t)ts_start.tv_sec * 1000 + (uint64_t)ts_start.tv_nsec / 1000000;
     uint64_t deadline_ms = start_ms + (uint64_t)timeout_ms;
     
-    fprintf(stderr, "[AUTONAT-V2] read_lp_message: starting read, timeout=%d ms\n", timeout_ms);
-    
     /* Read length prefix byte-by-byte with EAGAIN tolerance */
     uint8_t len_buf[10];
     size_t len_bytes = 0;
@@ -771,8 +769,6 @@ static int read_lp_message(libp2p_stream_t *s, uint8_t *buf, size_t buf_size, si
         ssize_t got = libp2p_stream_read(s, len_buf + len_bytes, 1);
         if (got == 1) {
             len_bytes++;
-            fprintf(stderr, "[AUTONAT-V2] read_lp_message: got len byte %zu, value=0x%02X\n", len_bytes, len_buf[len_bytes - 1]);
-            
             if ((len_buf[len_bytes - 1] & 0x80) == 0) {
                 /* MSB not set - this is the last varint byte */
                 size_t off = 0;
@@ -788,11 +784,7 @@ static int read_lp_message(libp2p_stream_t *s, uint8_t *buf, size_t buf_size, si
         if (got == LIBP2P_ERR_AGAIN) {
             /* No data available yet, wait a bit and retry */
             eagain_count++;
-            if (eagain_count % 100 == 0) {
-                fprintf(stderr, "[AUTONAT-V2] read_lp_message: EAGAIN count=%d, elapsed=%llu ms\n", 
-                        eagain_count, (unsigned long long)(now_ms - start_ms));
-            }
-            usleep(10000); /* 10ms - increased from 1ms */
+            usleep(10000); /* 10ms */
             continue;
         }
         
@@ -812,8 +804,6 @@ static int read_lp_message(libp2p_stream_t *s, uint8_t *buf, size_t buf_size, si
                 len_bytes, got, eagain_count);
         return -1;
     }
-    
-    fprintf(stderr, "[AUTONAT-V2] read_lp_message: msg_len=%llu\n", (unsigned long long)msg_len);
     
     if (msg_len == 0 || msg_len > buf_size) {
         fprintf(stderr, "[AUTONAT-V2] read_lp_message: invalid msg_len=%llu (buf_size=%zu)\n", 
@@ -856,7 +846,6 @@ static int read_lp_message(libp2p_stream_t *s, uint8_t *buf, size_t buf_size, si
     }
     
     *out_len = (size_t)msg_len;
-    fprintf(stderr, "[AUTONAT-V2] read_lp_message: success, read %zu bytes\n", total);
     return 0;
 }
 
@@ -899,39 +888,32 @@ static int write_lp_message(libp2p_stream_t *s, const uint8_t *buf, size_t len)
         }
     }
     
-    /* Write body in chunks with retry for flow control */
-    const size_t CHUNK_SIZE = 16384; /* 16KB chunks to work with send window */
+    /* Write body with retry for flow control */
     size_t written_total = 0;
     int retry_count = 0;
-    const int MAX_RETRIES = 200; /* ~10 seconds total with 50ms sleeps */
+    const int MAX_RETRIES = 100; /* ~5 seconds total with 50ms sleeps */
     
     while (written_total < len) {
         size_t remaining = len - written_total;
-        size_t to_write = remaining > CHUNK_SIZE ? CHUNK_SIZE : remaining;
         
-        ssize_t n = libp2p_stream_write(s, buf + written_total, to_write);
+        ssize_t n = libp2p_stream_write(s, buf + written_total, remaining);
         if (n > 0) {
             written_total += (size_t)n;
             retry_count = 0; /* Reset retry count on progress */
-            fprintf(stderr, "[AUTONAT-V2] write_lp_message: wrote %zd bytes, total=%zu/%zu\n", n, written_total, len);
         } else if (n == LIBP2P_ERR_AGAIN || n == LIBP2P_ERR_TIMEOUT) {
             /* Send window likely full - wait for WINDOW_UPDATE frames */
             retry_count++;
             if (retry_count > MAX_RETRIES) {
-                fprintf(stderr, "[AUTONAT-V2] write_lp_message: timed out waiting for send window\n");
+                fprintf(stderr, "[AUTONAT-V2] write_lp_message: timed out at %zu/%zu\n", written_total, len);
                 return -1;
             }
-            fprintf(stderr, "[AUTONAT-V2] write_lp_message: AGAIN/TIMEOUT at %zu/%zu (retry %d)\n", 
-                    written_total, len, retry_count);
             usleep(50000); /* 50ms wait for window updates */
         } else {
-            fprintf(stderr, "[AUTONAT-V2] write_lp_message: body write failed at %zu/%zu, n=%zd\n", 
+            fprintf(stderr, "[AUTONAT-V2] write_lp_message: failed at %zu/%zu, err=%zd\n", 
                     written_total, len, n);
             return -1;
         }
     }
-    
-    fprintf(stderr, "[AUTONAT-V2] write_lp_message: success, wrote %zu bytes total\n", written_total);
     return 0;
 }
 
@@ -1384,8 +1366,9 @@ static int probe_peer_v2(libp2p_autonat_service_t *svc, const peer_id_t *peer,
         memset(chunk_data, 0, sizeof(chunk_data));
         
         size_t bytes_sent = 0;
-        fprintf(stderr, "[AUTONAT-V2] sending DialDataResponse with %llu bytes in %zu-byte chunks\n", 
-                (unsigned long long)ddr.num_bytes, CHUNK_SIZE);
+        size_t num_chunks = (ddr.num_bytes + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        fprintf(stderr, "[AUTONAT-V2] sending %llu bytes of dial data (%zu chunks)...\n", 
+                (unsigned long long)ddr.num_bytes, num_chunks);
         
         while (bytes_sent < ddr.num_bytes) {
             size_t remaining = ddr.num_bytes - bytes_sent;
@@ -1403,7 +1386,7 @@ static int probe_peer_v2(libp2p_autonat_service_t *svc, const peer_id_t *peer,
             
             if (write_lp_message(stream, chunk_msg.buf, chunk_msg.len) != 0) {
                 free(chunk_msg.buf);
-                fprintf(stderr, "[AUTONAT-V2] failed to write DialDataResponse chunk at %zu/%llu\n",
+                fprintf(stderr, "[AUTONAT-V2] failed to write at %zu/%llu bytes\n",
                         bytes_sent, (unsigned long long)ddr.num_bytes);
                 result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
                 result->status_text = strdup("failed to write DialDataResponse");
@@ -1416,7 +1399,7 @@ static int probe_peer_v2(libp2p_autonat_service_t *svc, const peer_id_t *peer,
             bytes_sent += chunk_len;
         }
         
-        fprintf(stderr, "[AUTONAT-V2] finished sending %zu bytes of dial data\n", bytes_sent);
+        fprintf(stderr, "[AUTONAT-V2] dial data sent, waiting for response...\n");
         
         /* Now read the actual DialResponse */
         if (read_lp_message(stream, resp_buf, sizeof(resp_buf), &resp_len, 30000) != 0) {

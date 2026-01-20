@@ -49,6 +49,7 @@
 #include "multiformats/multiaddr/multiaddr.h"
 #include "multiformats/unsigned_varint/unsigned_varint.h"
 #include "peer_id/peer_id.h"
+#include "protocol/tcp/protocol_tcp_conn.h"
 
 #define DCUTR_MAX_MSG_SIZE 4096
 #define DCUTR_DEFAULT_HOLE_PUNCH_TIMEOUT_MS 5000
@@ -824,18 +825,39 @@ static void *dcutr_server_worker(void *arg)
     libp2p_stream_close(s);
     libp2p__stream_release_async(s);
 
-    if (rc == 0 && success_addr)
+    if (rc == 0 && success_addr && success_fd >= 0)
     {
-        fprintf(stderr, "[DCUTR] hole punch SUCCESS via %s\n", success_addr);
+        fprintf(stderr, "[DCUTR] hole punch SUCCESS via %s (fd=%d)\n", success_addr, success_fd);
         notify_upgrade(svc, remote, success_addr, LIBP2P_DCUTR_RESULT_SUCCESS);
-        /* TODO: Hand off success_fd to the host to create a proper connection */
-        if (success_fd >= 0)
+
+        /* Create a libp2p connection from the hole-punched socket and hand off to host */
+        libp2p_conn_t *raw = make_tcp_conn(success_fd);
+        if (raw && host)
+        {
+            int accept_rc = libp2p__host_accept_inbound_raw(host, raw);
+            if (accept_rc == 0)
+            {
+                fprintf(stderr, "[DCUTR] successfully handed off hole-punched connection to host\n");
+            }
+            else
+            {
+                fprintf(stderr, "[DCUTR] failed to hand off connection (rc=%d)\n", accept_rc);
+                libp2p_conn_free(raw);
+            }
+        }
+        else
+        {
+            if (!raw)
+                fprintf(stderr, "[DCUTR] failed to create connection from fd\n");
             close(success_fd);
+        }
     }
     else
     {
         fprintf(stderr, "[DCUTR] hole punch FAILED for peer=%s\n", peer_str);
         notify_upgrade(svc, remote, NULL, LIBP2P_DCUTR_RESULT_HOLE_PUNCH_FAILED);
+        if (success_fd >= 0)
+            close(success_fd);
     }
 
     free(success_addr);
@@ -895,6 +917,53 @@ static void dcutr_on_open(libp2p_stream_t *s, void *ud)
 
 /* ----------------------- event handler for address discovery ----------------------- */
 
+/* Context for async DCUtR upgrade worker */
+typedef struct dcutr_auto_upgrade_ctx
+{
+    libp2p_dcutr_service_t *svc;
+    peer_id_t *peer;
+} dcutr_auto_upgrade_ctx_t;
+
+/* Worker thread to initiate DCUtR upgrade asynchronously */
+static void *dcutr_auto_upgrade_worker(void *arg)
+{
+    dcutr_auto_upgrade_ctx_t *ctx = (dcutr_auto_upgrade_ctx_t *)arg;
+    if (!ctx)
+        return NULL;
+
+    libp2p_dcutr_service_t *svc = ctx->svc;
+    peer_id_t *peer = ctx->peer;
+    free(ctx);
+
+    if (!svc || !peer)
+    {
+        if (peer)
+            peer_id_destroy(peer);
+        return NULL;
+    }
+
+    char peer_str[128] = {0};
+    peer_id_to_string(peer, PEER_ID_FMT_BASE58_LEGACY, peer_str, sizeof(peer_str));
+
+    /* Small delay to let the relay connection stabilize */
+    usleep(500000); /* 500ms */
+
+    fprintf(stderr, "[DCUTR] auto-initiating upgrade for relay connection to peer=%s\n", peer_str);
+
+    int rc = libp2p_dcutr_upgrade(svc, peer, svc->opts.hole_punch_timeout_ms);
+    if (rc == 0)
+    {
+        fprintf(stderr, "[DCUTR] auto-upgrade SUCCESS for peer=%s\n", peer_str);
+    }
+    else
+    {
+        fprintf(stderr, "[DCUTR] auto-upgrade FAILED for peer=%s (rc=%d)\n", peer_str, rc);
+    }
+
+    peer_id_destroy(peer);
+    return NULL;
+}
+
 static void dcutr_event_handler(const libp2p_event_t *evt, void *user_data)
 {
     libp2p_dcutr_service_t *svc = (libp2p_dcutr_service_t *)user_data;
@@ -910,6 +979,58 @@ static void dcutr_event_handler(const libp2p_event_t *evt, void *user_data)
         if (addr && is_public_addr(addr))
         {
             libp2p_dcutr_add_observed_addr(svc, addr);
+        }
+    }
+    else if (evt->kind == LIBP2P_EVT_CONN_OPENED)
+    {
+        /* Check if this is a relay connection (contains /p2p-circuit) */
+        const char *addr = evt->u.conn_opened.addr;
+        const peer_id_t *peer = evt->u.conn_opened.peer;
+        bool inbound = evt->u.conn_opened.inbound;
+
+        if (addr && peer && strstr(addr, "/p2p-circuit") != NULL)
+        {
+            char peer_str[128] = {0};
+            peer_id_to_string(peer, PEER_ID_FMT_BASE58_LEGACY, peer_str, sizeof(peer_str));
+            fprintf(stderr, "[DCUTR] detected relay connection to peer=%s inbound=%d addr=%s\n",
+                    peer_str, inbound, addr);
+
+            /* Check if we have observed addresses (meaning we're behind NAT) */
+            pthread_mutex_lock(&svc->mtx);
+            size_t num_addrs = svc->num_observed_addrs;
+            pthread_mutex_unlock(&svc->mtx);
+
+            if (num_addrs > 0)
+            {
+                /* We're behind NAT - initiate DCUtR upgrade asynchronously */
+                dcutr_auto_upgrade_ctx_t *ctx = (dcutr_auto_upgrade_ctx_t *)calloc(1, sizeof(*ctx));
+                if (ctx)
+                {
+                    ctx->svc = svc;
+                    ctx->peer = peer_id_copy(peer);
+                    if (ctx->peer)
+                    {
+                        pthread_t th;
+                        if (pthread_create(&th, NULL, dcutr_auto_upgrade_worker, ctx) == 0)
+                        {
+                            pthread_detach(th);
+                        }
+                        else
+                        {
+                            peer_id_destroy(ctx->peer);
+                            free(ctx);
+                        }
+                    }
+                    else
+                    {
+                        free(ctx);
+                    }
+                }
+            }
+            else
+            {
+                fprintf(stderr, "[DCUTR] no observed addresses yet, skipping auto-upgrade\n");
+            }
         }
     }
 }
@@ -1259,13 +1380,33 @@ int libp2p_dcutr_upgrade(libp2p_dcutr_service_t *svc, const peer_id_t *peer, int
     libp2p_stream_close(s);
     libp2p_stream_free(s);
 
-    if (rc == 0 && success_addr)
+    if (rc == 0 && success_addr && success_fd >= 0)
     {
-        fprintf(stderr, "[DCUTR] upgrade SUCCESS via %s\n", success_addr);
+        fprintf(stderr, "[DCUTR] upgrade SUCCESS via %s (fd=%d)\n", success_addr, success_fd);
         notify_upgrade(svc, peer, success_addr, LIBP2P_DCUTR_RESULT_SUCCESS);
-        /* TODO: Hand off success_fd to the host to create a proper connection */
-        if (success_fd >= 0)
+
+        /* Create a libp2p connection from the hole-punched socket and hand off to host */
+        libp2p_conn_t *raw = make_tcp_conn(success_fd);
+        if (raw && svc->host)
+        {
+            int accept_rc = libp2p__host_accept_inbound_raw(svc->host, raw);
+            if (accept_rc == 0)
+            {
+                fprintf(stderr, "[DCUTR] successfully handed off hole-punched connection to host\n");
+            }
+            else
+            {
+                fprintf(stderr, "[DCUTR] failed to hand off connection (rc=%d)\n", accept_rc);
+                libp2p_conn_free(raw);
+            }
+        }
+        else
+        {
+            if (!raw)
+                fprintf(stderr, "[DCUTR] failed to create connection from fd\n");
             close(success_fd);
+        }
+
         free(success_addr);
         return 0;
     }
@@ -1273,5 +1414,7 @@ int libp2p_dcutr_upgrade(libp2p_dcutr_service_t *svc, const peer_id_t *peer, int
     fprintf(stderr, "[DCUTR] upgrade FAILED for peer=%s\n", peer_str);
     notify_upgrade(svc, peer, NULL, LIBP2P_DCUTR_RESULT_HOLE_PUNCH_FAILED);
     free(success_addr);
+    if (success_fd >= 0)
+        close(success_fd);
     return LIBP2P_ERR_INTERNAL;
 }
