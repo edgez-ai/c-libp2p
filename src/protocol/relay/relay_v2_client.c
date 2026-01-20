@@ -658,11 +658,14 @@ static void *relay_stop_worker(void *arg)
     }
 
     /* Add initiator peer to peerstore with relay circuit address so we can open streams to them */
+    fprintf(stderr, "[RELAY STOP] DEBUG: checking peerstore add: initiator=%p host=%p peerstore=%p\n",
+            (void*)initiator_peer, (void*)host, host ? (void*)host->peerstore : NULL);
     if (initiator_peer && host && host->peerstore)
     {
         /* Get the relay server's address from the stream */
         const multiaddr_t *relay_addr = libp2p_stream_remote_addr(s);
         const peer_id_t *relay_peer = libp2p_stream_remote_peer(s);
+        fprintf(stderr, "[RELAY STOP] DEBUG: relay_addr=%p relay_peer=%p\n", (void*)relay_addr, (void*)relay_peer);
         if (relay_addr && relay_peer)
         {
             int ma_err = 0;
@@ -672,6 +675,9 @@ static void *relay_stop_worker(void *arg)
             peer_id_to_string(relay_peer, PEER_ID_FMT_BASE58_LEGACY, relay_peer_str, sizeof(relay_peer_str));
             peer_id_to_string(initiator_peer, PEER_ID_FMT_BASE58_LEGACY, init_peer_str, sizeof(init_peer_str));
             
+            fprintf(stderr, "[RELAY STOP] DEBUG: relay_addr_str=%s relay_peer_str=%s init_peer_str=%s\n",
+                    relay_addr_str ? relay_addr_str : "NULL", relay_peer_str, init_peer_str);
+            
             if (relay_addr_str && relay_peer_str[0] && init_peer_str[0])
             {
                 /* Build circuit address: <relay_addr>/p2p/<relay_peer>/p2p-circuit/p2p/<initiator> */
@@ -680,12 +686,15 @@ static void *relay_stop_worker(void *arg)
                          "%s/p2p/%s/p2p-circuit/p2p/%s",
                          relay_addr_str, relay_peer_str, init_peer_str);
                 
+                fprintf(stderr, "[RELAY STOP] DEBUG: circuit_addr_str=%s\n", circuit_addr_str);
+                
                 multiaddr_t *circuit_ma = multiaddr_new_from_str(circuit_addr_str, &ma_err);
+                fprintf(stderr, "[RELAY STOP] DEBUG: circuit_ma=%p ma_err=%d\n", (void*)circuit_ma, ma_err);
                 if (circuit_ma)
                 {
                     /* Add to peerstore with 5 minute TTL */
-                    libp2p_peerstore_add_addr(host->peerstore, initiator_peer, circuit_ma, 5 * 60 * 1000);
-                    fprintf(stderr, "[RELAY STOP] added initiator to peerstore: %s\n", circuit_addr_str);
+                    int add_rc = libp2p_peerstore_add_addr(host->peerstore, initiator_peer, circuit_ma, 5 * 60 * 1000);
+                    fprintf(stderr, "[RELAY STOP] added initiator to peerstore (rc=%d): %s\n", add_rc, circuit_addr_str);
                     multiaddr_free(circuit_ma);
                 }
             }
