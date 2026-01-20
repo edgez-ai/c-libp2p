@@ -733,7 +733,7 @@ static char *extract_ip_from_addr(const char *addr)
     return NULL;
 }
 
-/* Read length-prefixed message from stream */
+/* Read length-prefixed message from stream with EAGAIN tolerance */
 static int read_lp_message(libp2p_stream_t *s, uint8_t *buf, size_t buf_size, size_t *out_len, int timeout_ms)
 {
     if (!s || !buf || !out_len) {
@@ -741,31 +741,65 @@ static int read_lp_message(libp2p_stream_t *s, uint8_t *buf, size_t buf_size, si
         return -1;
     }
     
-    /* Set deadline for read operations */
-    int rc = libp2p_stream_set_deadline(s, (uint64_t)timeout_ms);
-    fprintf(stderr, "[AUTONAT-V2] read_lp_message: set deadline %d ms, rc=%d\n", timeout_ms, rc);
+    /* Use monotonic time for timeout tracking */
+    struct timespec ts_start;
+    clock_gettime(CLOCK_MONOTONIC, &ts_start);
+    uint64_t start_ms = (uint64_t)ts_start.tv_sec * 1000 + (uint64_t)ts_start.tv_nsec / 1000000;
+    uint64_t deadline_ms = start_ms + (uint64_t)timeout_ms;
     
-    /* Read length prefix */
+    fprintf(stderr, "[AUTONAT-V2] read_lp_message: starting read, timeout=%d ms\n", timeout_ms);
+    
+    /* Read length prefix byte-by-byte with EAGAIN tolerance */
     uint8_t len_buf[10];
     size_t len_bytes = 0;
     uint64_t msg_len = 0;
+    int eagain_count = 0;
     
-    for (int i = 0; i < 10; i++) {
-        ssize_t got = libp2p_stream_read(s, len_buf + i, 1);
-        if (got != 1) {
-            fprintf(stderr, "[AUTONAT-V2] read_lp_message: len byte %d read failed, got=%zd\n", i, got);
+    while (len_bytes < sizeof(len_buf)) {
+        struct timespec ts_now;
+        clock_gettime(CLOCK_MONOTONIC, &ts_now);
+        uint64_t now_ms = (uint64_t)ts_now.tv_sec * 1000 + (uint64_t)ts_now.tv_nsec / 1000000;
+        
+        if (now_ms >= deadline_ms) {
+            fprintf(stderr, "[AUTONAT-V2] read_lp_message: timeout reading length prefix after %d EAGAIN retries\n", eagain_count);
             return -1;
         }
-        len_bytes++;
         
-        if ((len_buf[i] & 0x80) == 0) {
-            size_t off = 0;
-            if (pb_read_varint(len_buf, len_bytes, &off, &msg_len) != 0) {
-                fprintf(stderr, "[AUTONAT-V2] read_lp_message: varint parse failed\n");
-                return -1;
+        uint64_t remain_ms = deadline_ms - now_ms;
+        libp2p_stream_set_deadline(s, remain_ms);
+        
+        ssize_t got = libp2p_stream_read(s, len_buf + len_bytes, 1);
+        if (got == 1) {
+            len_bytes++;
+            fprintf(stderr, "[AUTONAT-V2] read_lp_message: got len byte %zu, value=0x%02X\n", len_bytes, len_buf[len_bytes - 1]);
+            
+            if ((len_buf[len_bytes - 1] & 0x80) == 0) {
+                /* MSB not set - this is the last varint byte */
+                size_t off = 0;
+                if (pb_read_varint(len_buf, len_bytes, &off, &msg_len) != 0) {
+                    fprintf(stderr, "[AUTONAT-V2] read_lp_message: varint parse failed\n");
+                    return -1;
+                }
+                break;
             }
-            break;
+            continue;
         }
+        
+        if (got == LIBP2P_ERR_AGAIN) {
+            /* No data available yet, wait a bit and retry */
+            eagain_count++;
+            if (eagain_count % 100 == 0) {
+                fprintf(stderr, "[AUTONAT-V2] read_lp_message: EAGAIN count=%d, elapsed=%llu ms\n", 
+                        eagain_count, (unsigned long long)(now_ms - start_ms));
+            }
+            usleep(10000); /* 10ms - increased from 1ms */
+            continue;
+        }
+        
+        /* Fatal error */
+        fprintf(stderr, "[AUTONAT-V2] read_lp_message: len byte %zu read failed, got=%zd (EAGAIN count was %d)\n", 
+                len_bytes, got, eagain_count);
+        return -1;
     }
     
     fprintf(stderr, "[AUTONAT-V2] read_lp_message: msg_len=%llu\n", (unsigned long long)msg_len);
@@ -776,16 +810,38 @@ static int read_lp_message(libp2p_stream_t *s, uint8_t *buf, size_t buf_size, si
         return -1;
     }
     
-    /* Read message body */
+    /* Read message body with EAGAIN tolerance */
     size_t total = 0;
     while (total < msg_len) {
-        ssize_t got = libp2p_stream_read(s, buf + total, msg_len - total);
-        if (got <= 0) {
-            fprintf(stderr, "[AUTONAT-V2] read_lp_message: body read failed at %zu/%llu, got=%zd\n",
-                    total, (unsigned long long)msg_len, got);
+        struct timespec ts_now;
+        clock_gettime(CLOCK_MONOTONIC, &ts_now);
+        uint64_t now_ms = (uint64_t)ts_now.tv_sec * 1000 + (uint64_t)ts_now.tv_nsec / 1000000;
+        
+        if (now_ms >= deadline_ms) {
+            fprintf(stderr, "[AUTONAT-V2] read_lp_message: timeout reading body at %zu/%llu\n",
+                    total, (unsigned long long)msg_len);
             return -1;
         }
-        total += (size_t)got;
+        
+        uint64_t remain_ms = deadline_ms - now_ms;
+        libp2p_stream_set_deadline(s, remain_ms);
+        
+        ssize_t got = libp2p_stream_read(s, buf + total, msg_len - total);
+        if (got > 0) {
+            total += (size_t)got;
+            continue;
+        }
+        
+        if (got == LIBP2P_ERR_AGAIN) {
+            /* No data available yet, wait a bit and retry */
+            usleep(1000); /* 1ms */
+            continue;
+        }
+        
+        /* Fatal error */
+        fprintf(stderr, "[AUTONAT-V2] read_lp_message: body read failed at %zu/%llu, got=%zd\n",
+                total, (unsigned long long)msg_len, got);
+        return -1;
     }
     
     *out_len = (size_t)msg_len;
@@ -1201,6 +1257,9 @@ static int probe_peer_v2(libp2p_autonat_service_t *svc, const peer_id_t *peer,
     }
     
     fprintf(stderr, "[AUTONAT-V2] stream opened, sending dial-request\n");
+    
+    /* Small delay to ensure yamux loop thread has started */
+    usleep(50000); /* 50ms */
     
     /* Write DialRequest message with LP framing */
     if (write_lp_message(stream, msg.buf, msg.len) != 0) {

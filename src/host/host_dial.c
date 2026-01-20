@@ -172,17 +172,28 @@ static void *outbound_yamux_loop(void *arg)
         (void)libp2p_yamux_enable_keepalive(ctx->yctx, 15000);
         /* Process frames one at a time, accepting inbound streams as they arrive */
         atomic_store_explicit(&ctx->yctx->loop_active, true, memory_order_release);
+        LP_LOGI("HOST_DIAL", "outbound_yamux_loop starting, loop_active=1");
+        int frame_count = 0;
+        int eagain_count = 0;
         while (!atomic_load_explicit(&ctx->yctx->stop, memory_order_acquire))
         {
             libp2p_yamux_err_t rc = libp2p_yamux_process_one(ctx->yctx);
             if (rc == LIBP2P_YAMUX_ERR_AGAIN)
             {
+                eagain_count++;
                 /* No frame yet, but check for accepted inbound streams */
             }
             else if (rc != LIBP2P_YAMUX_OK)
             {
-                LP_LOGD("HOST_DIAL", "outbound_yamux_loop process_one error rc=%d", (int)rc);
+                LP_LOGD("HOST_DIAL", "outbound_yamux_loop process_one error rc=%d (frames=%d eagain=%d)", (int)rc, frame_count, eagain_count);
                 break;
+            }
+            else
+            {
+                frame_count++;
+                if (frame_count % 10 == 1) {
+                    LP_LOGI("HOST_DIAL", "outbound_yamux_loop processed frame #%d", frame_count);
+                }
             }
 
             /* Accept and dispatch any inbound substreams (critical for relay STOP) */
