@@ -13,7 +13,12 @@ extern "C"
 {
 #endif
 
+/* AutoNAT v1 (deprecated) */
 #define LIBP2P_AUTONAT_PROTO_ID "/libp2p/autonat/1.0.0"
+
+/* AutoNAT v2 protocol IDs */
+#define LIBP2P_AUTONAT_V2_DIAL_REQUEST_PROTO "/libp2p/autonat/2/dial-request"
+#define LIBP2P_AUTONAT_V2_DIAL_BACK_PROTO    "/libp2p/autonat/2/dial-back"
 
 /**
  * AutoNAT reachability status.
