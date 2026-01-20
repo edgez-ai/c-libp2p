@@ -388,7 +388,7 @@ static void *outbound_inbound_substream_worker(void *arg)
 
     /* Invoke protocol handler */
     LP_LOGI("HOST_DIAL", "outbound inbound_substream: invoking on_open for protocol=%s", incoming_id);
-    chosen.on_open(stream, chosen.user_data, 0);
+    chosen.on_open(stream, chosen.user_data);
 
     if (c->host)
         libp2p__worker_dec(c->host);
