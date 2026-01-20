@@ -682,10 +682,14 @@ int libp2p_relay_v2_reserve_keep_stream(libp2p_host_t *host, const char *relay_m
     hop_msg_t hmsg;
     if (parse_hop_message(buf, (size_t)n, &hmsg) != 0 || !hmsg.type_set || !hmsg.status_set || hmsg.type != 2)
     {
+        fprintf(stderr, "[RELAY] failed to parse hop response (n=%zd type_set=%d status_set=%d type=%d)\n",
+                n, hmsg.type_set, hmsg.status_set, hmsg.type);
         libp2p_stream_close(s);
         libp2p_stream_free(s);
         return LIBP2P_ERR_INTERNAL;
     }
+
+    fprintf(stderr, "[RELAY] received hop response: status=%d expire=%llu\n", hmsg.status, (unsigned long long)hmsg.expire);
 
     if (out)
     {
