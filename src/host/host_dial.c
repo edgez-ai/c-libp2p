@@ -781,6 +781,9 @@ static int do_dial_and_select(libp2p_host_t *host, const char *remote_multiaddr,
     {
         peer_id_t peer = {0};
         int have_peer = 0;
+        
+        fprintf(stderr, "[DIAL REUSE] checking multiaddr: %s\n", remote_multiaddr);
+        
         const char *p = strstr(remote_multiaddr, "/p2p/");
         size_t skip = 5;
         if (!p)
@@ -800,7 +803,13 @@ static int do_dial_and_select(libp2p_host_t *host, const char *remote_multiaddr,
                 peer_str[len] = '\0';
                 if (peer_id_create_from_string(peer_str, &peer) == PEER_ID_SUCCESS)
                     have_peer = 1;
+                else
+                    fprintf(stderr, "[DIAL REUSE] failed to parse peer_id from: %s\n", peer_str);
             }
+        }
+        else
+        {
+            fprintf(stderr, "[DIAL REUSE] no /p2p/ or /ipfs/ in multiaddr\n");
         }
 
         if (have_peer)
@@ -1905,6 +1914,8 @@ int libp2p_host_open_stream(libp2p_host_t *host, const peer_id_t *peer, const ch
         if (!maddr)
             continue;
         
+        fprintf(stderr, "[HOST OPEN_STREAM] original addr: %s\n", maddr);
+        
         /* Append /p2p/<peer-id> suffix if not present, to enable session reuse */
         char *maddr_with_peer = maddr;
         if (!strstr(maddr, "/p2p/") && !strstr(maddr, "/ipfs/"))
@@ -1917,6 +1928,7 @@ int libp2p_host_open_stream(libp2p_host_t *host, const peer_id_t *peer, const ch
                 if (maddr_with_peer)
                 {
                     snprintf(maddr_with_peer, new_len, "%s/p2p/%s", maddr, peer_str);
+                    fprintf(stderr, "[HOST OPEN_STREAM] with peer suffix: %s\n", maddr_with_peer);
                     free(maddr);
                     maddr = maddr_with_peer;
                 }
@@ -1924,6 +1936,10 @@ int libp2p_host_open_stream(libp2p_host_t *host, const peer_id_t *peer, const ch
                 {
                     maddr_with_peer = maddr;
                 }
+            }
+            else
+            {
+                fprintf(stderr, "[HOST OPEN_STREAM] failed to get peer string\n");
             }
         }
         

@@ -860,7 +860,7 @@ static int read_lp_message(libp2p_stream_t *s, uint8_t *buf, size_t buf_size, si
     return 0;
 }
 
-/* Write length-prefixed message to stream */
+/* Write length-prefixed message to stream with retry handling */
 static int write_lp_message(libp2p_stream_t *s, const uint8_t *buf, size_t len)
 {
     if (!s || !buf) {
@@ -878,21 +878,60 @@ static int write_lp_message(libp2p_stream_t *s, const uint8_t *buf, size_t len)
     
     fprintf(stderr, "[AUTONAT-V2] write_lp_message: writing %zu bytes (prefix=%zu)\n", len, len_bytes);
     
-    /* Write length */
-    ssize_t written = libp2p_stream_write(s, len_buf, len_bytes);
-    if (written < 0 || (size_t)written != len_bytes) {
-        fprintf(stderr, "[AUTONAT-V2] write_lp_message: prefix write failed, written=%zd\n", written);
-        return -1;
+    /* Write length prefix with retry */
+    size_t written_prefix = 0;
+    int prefix_retries = 0;
+    while (written_prefix < len_bytes) {
+        ssize_t n = libp2p_stream_write(s, len_buf + written_prefix, len_bytes - written_prefix);
+        if (n > 0) {
+            written_prefix += (size_t)n;
+        } else if (n == LIBP2P_ERR_AGAIN || n == LIBP2P_ERR_TIMEOUT) {
+            /* Retry with short sleep */
+            prefix_retries++;
+            if (prefix_retries > 100) {
+                fprintf(stderr, "[AUTONAT-V2] write_lp_message: prefix write timed out\n");
+                return -1;
+            }
+            usleep(10000);  /* 10ms */
+        } else {
+            fprintf(stderr, "[AUTONAT-V2] write_lp_message: prefix write failed, n=%zd\n", n);
+            return -1;
+        }
     }
     
-    /* Write body */
-    written = libp2p_stream_write(s, buf, len);
-    if (written < 0 || (size_t)written != len) {
-        fprintf(stderr, "[AUTONAT-V2] write_lp_message: body write failed, written=%zd\n", written);
-        return -1;
+    /* Write body in chunks with retry for flow control */
+    const size_t CHUNK_SIZE = 16384; /* 16KB chunks to work with send window */
+    size_t written_total = 0;
+    int retry_count = 0;
+    const int MAX_RETRIES = 200; /* ~10 seconds total with 50ms sleeps */
+    
+    while (written_total < len) {
+        size_t remaining = len - written_total;
+        size_t to_write = remaining > CHUNK_SIZE ? CHUNK_SIZE : remaining;
+        
+        ssize_t n = libp2p_stream_write(s, buf + written_total, to_write);
+        if (n > 0) {
+            written_total += (size_t)n;
+            retry_count = 0; /* Reset retry count on progress */
+            fprintf(stderr, "[AUTONAT-V2] write_lp_message: wrote %zd bytes, total=%zu/%zu\n", n, written_total, len);
+        } else if (n == LIBP2P_ERR_AGAIN || n == LIBP2P_ERR_TIMEOUT) {
+            /* Send window likely full - wait for WINDOW_UPDATE frames */
+            retry_count++;
+            if (retry_count > MAX_RETRIES) {
+                fprintf(stderr, "[AUTONAT-V2] write_lp_message: timed out waiting for send window\n");
+                return -1;
+            }
+            fprintf(stderr, "[AUTONAT-V2] write_lp_message: AGAIN/TIMEOUT at %zu/%zu (retry %d)\n", 
+                    written_total, len, retry_count);
+            usleep(50000); /* 50ms wait for window updates */
+        } else {
+            fprintf(stderr, "[AUTONAT-V2] write_lp_message: body write failed at %zu/%zu, n=%zd\n", 
+                    written_total, len, n);
+            return -1;
+        }
     }
     
-    fprintf(stderr, "[AUTONAT-V2] write_lp_message: success\n");
+    fprintf(stderr, "[AUTONAT-V2] write_lp_message: success, wrote %zu bytes total\n", written_total);
     return 0;
 }
 

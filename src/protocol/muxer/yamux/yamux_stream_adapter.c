@@ -49,13 +49,48 @@ static ssize_t yst_write(void *io_ctx, const void *buf, size_t len)
     ystream_ctx_t *x = (ystream_ctx_t *)io_ctx;
     if (!x || !x->ctx || !buf)
         return LIBP2P_ERR_NULL_PTR;
+    LP_LOGD("YAMUX", "yst_write id=%u: attempting to write %zu bytes", x->id, len);
     libp2p_yamux_err_t rc = libp2p_yamux_stream_send(x->ctx, x->id, (const uint8_t *)buf, len, 0);
-    if (rc == LIBP2P_YAMUX_OK)
+    if (rc == LIBP2P_YAMUX_OK) {
+        LP_LOGD("YAMUX", "yst_write id=%u: wrote %zu bytes OK", x->id, len);
         return (ssize_t)len;
-    if (rc == LIBP2P_YAMUX_ERR_AGAIN)
+    }
+    if (rc == LIBP2P_YAMUX_ERR_AGAIN) {
+        /* Opportunistically pump frames to advance flow control if no loop is active. */
+        if (!atomic_load_explicit(&x->ctx->loop_active, memory_order_acquire))
+        {
+            LP_LOGD("YAMUX", "yst_write id=%u: AGAIN, pumping yamux frames", x->id);
+            for (int i = 0; i < 8; i++)
+            {
+                libp2p_yamux_err_t pr = libp2p_yamux_process_one(x->ctx);
+                if (pr == LIBP2P_YAMUX_ERR_AGAIN)
+                    break;
+                if (pr != LIBP2P_YAMUX_OK)
+                    break;
+            }
+            /* Retry send after pumping */
+            rc = libp2p_yamux_stream_send(x->ctx, x->id, (const uint8_t *)buf, len, 0);
+            if (rc == LIBP2P_YAMUX_OK) {
+                LP_LOGD("YAMUX", "yst_write id=%u: wrote %zu bytes OK after pump", x->id, len);
+                return (ssize_t)len;
+            }
+        }
+        LP_LOGD("YAMUX", "yst_write id=%u: AGAIN (send window full, need %zu)", x->id, len);
         return LIBP2P_ERR_AGAIN;
-    if (rc == LIBP2P_YAMUX_ERR_TIMEOUT)
+    }
+    if (rc == LIBP2P_YAMUX_ERR_TIMEOUT) {
+        LP_LOGD("YAMUX", "yst_write id=%u: TIMEOUT", x->id);
         return LIBP2P_ERR_TIMEOUT;
+    }
+    if (rc == LIBP2P_YAMUX_ERR_RESET) {
+        LP_LOGD("YAMUX", "yst_write id=%u: stream RESET", x->id);
+        return LIBP2P_ERR_RESET;
+    }
+    if (rc == LIBP2P_YAMUX_ERR_EOF) {
+        LP_LOGD("YAMUX", "yst_write id=%u: stream EOF/closed", x->id);
+        return LIBP2P_ERR_EOF;
+    }
+    LP_LOGW("YAMUX", "yst_write id=%u: unknown yamux error %d -> INTERNAL", x->id, (int)rc);
     return LIBP2P_ERR_INTERNAL;
 }
 
