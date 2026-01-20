@@ -720,15 +720,17 @@ static int read_lp_message(libp2p_stream_t *s, uint8_t *buf, size_t buf_size, si
 {
     if (!s || !buf || !out_len) return -1;
     
+    /* Set deadline for read operations */
+    libp2p_stream_set_deadline(s, (uint64_t)timeout_ms);
+    
     /* Read length prefix */
     uint8_t len_buf[10];
     size_t len_bytes = 0;
     uint64_t msg_len = 0;
     
     for (int i = 0; i < 10; i++) {
-        size_t got = 0;
-        int rc = libp2p_stream_read_timeout(s, len_buf + i, 1, &got, timeout_ms);
-        if (rc != 0 || got != 1) return -1;
+        ssize_t got = libp2p_stream_read(s, len_buf + i, 1);
+        if (got != 1) return -1;
         len_bytes++;
         
         if ((len_buf[i] & 0x80) == 0) {
@@ -743,11 +745,9 @@ static int read_lp_message(libp2p_stream_t *s, uint8_t *buf, size_t buf_size, si
     /* Read message body */
     size_t total = 0;
     while (total < msg_len) {
-        size_t got = 0;
-        int rc = libp2p_stream_read_timeout(s, buf + total, msg_len - total, &got, timeout_ms);
-        if (rc != 0) return -1;
-        if (got == 0) return -1;
-        total += got;
+        ssize_t got = libp2p_stream_read(s, buf + total, msg_len - total);
+        if (got <= 0) return -1;
+        total += (size_t)got;
     }
     
     *out_len = (size_t)msg_len;
@@ -766,13 +766,13 @@ static int write_lp_message(libp2p_stream_t *s, const uint8_t *buf, size_t len)
         return -1;
     
     /* Write length */
-    size_t written = 0;
-    if (libp2p_stream_write(s, len_buf, len_bytes, &written) != 0 || written != len_bytes)
+    ssize_t written = libp2p_stream_write(s, len_buf, len_bytes);
+    if (written < 0 || (size_t)written != len_bytes)
         return -1;
     
     /* Write body */
-    written = 0;
-    if (libp2p_stream_write(s, buf, len, &written) != 0 || written != len)
+    written = libp2p_stream_write(s, buf, len);
+    if (written < 0 || (size_t)written != len)
         return -1;
     
     return 0;
@@ -1132,7 +1132,7 @@ int libp2p_autonat_new(libp2p_host_t *host, const libp2p_autonat_opts_t *opts,
     /* Register dial-back handler (client side - receives dial-backs) */
     libp2p_protocol_def_t dial_back_def = {0};
     dial_back_def.protocol_id = AUTONAT_V2_DIAL_BACK_PROTO;
-    dial_back_def.handler = on_dial_back_stream;
+    dial_back_def.on_open = on_dial_back_stream;
     dial_back_def.user_data = svc;
     int rc = libp2p_register_protocol(host, &dial_back_def);
     if (rc != 0) {
@@ -1145,7 +1145,7 @@ int libp2p_autonat_new(libp2p_host_t *host, const libp2p_autonat_opts_t *opts,
     if (svc->opts.enable_service) {
         libp2p_protocol_def_t dial_req_def = {0};
         dial_req_def.protocol_id = AUTONAT_V2_DIAL_REQUEST_PROTO;
-        dial_req_def.handler = on_dial_request_stream;
+        dial_req_def.on_open = on_dial_request_stream;
         dial_req_def.user_data = svc;
         rc = libp2p_register_protocol(host, &dial_req_def);
         if (rc != 0) {
