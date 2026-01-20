@@ -1378,38 +1378,45 @@ static int probe_peer_v2(libp2p_autonat_service_t *svc, const peer_id_t *peer,
             goto cleanup;
         }
         
-        /* Send DialDataResponse with random data */
-        uint8_t *data = (uint8_t *)calloc(1, ddr.num_bytes);
-        if (!data) {
-            result->status = LIBP2P_AUTONAT_STATUS_E_INTERNAL_ERROR;
-            result->status_text = strdup("out of memory");
-            libp2p_stream_close(stream);
-            libp2p_stream_free(stream);
-            goto cleanup;
+        /* Send DialDataResponse messages in chunks of max 4096 bytes per spec */
+        const size_t CHUNK_SIZE = 4096;
+        uint8_t chunk_data[CHUNK_SIZE];
+        memset(chunk_data, 0, sizeof(chunk_data));
+        
+        size_t bytes_sent = 0;
+        fprintf(stderr, "[AUTONAT-V2] sending DialDataResponse with %llu bytes in %zu-byte chunks\n", 
+                (unsigned long long)ddr.num_bytes, CHUNK_SIZE);
+        
+        while (bytes_sent < ddr.num_bytes) {
+            size_t remaining = ddr.num_bytes - bytes_sent;
+            size_t chunk_len = remaining > CHUNK_SIZE ? CHUNK_SIZE : remaining;
+            
+            pb_buf_t chunk_msg = {0};
+            if (encode_dial_data_response(&chunk_msg, chunk_data, chunk_len) != 0) {
+                fprintf(stderr, "[AUTONAT-V2] failed to encode DialDataResponse chunk\n");
+                result->status = LIBP2P_AUTONAT_STATUS_E_INTERNAL_ERROR;
+                result->status_text = strdup("failed to encode DialDataResponse");
+                libp2p_stream_close(stream);
+                libp2p_stream_free(stream);
+                goto cleanup;
+            }
+            
+            if (write_lp_message(stream, chunk_msg.buf, chunk_msg.len) != 0) {
+                free(chunk_msg.buf);
+                fprintf(stderr, "[AUTONAT-V2] failed to write DialDataResponse chunk at %zu/%llu\n",
+                        bytes_sent, (unsigned long long)ddr.num_bytes);
+                result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
+                result->status_text = strdup("failed to write DialDataResponse");
+                libp2p_stream_close(stream);
+                libp2p_stream_free(stream);
+                goto cleanup;
+            }
+            free(chunk_msg.buf);
+            
+            bytes_sent += chunk_len;
         }
         
-        pb_buf_t ddr_msg = {0};
-        if (encode_dial_data_response(&ddr_msg, data, ddr.num_bytes) != 0) {
-            free(data);
-            result->status = LIBP2P_AUTONAT_STATUS_E_INTERNAL_ERROR;
-            result->status_text = strdup("failed to encode DialDataResponse");
-            libp2p_stream_close(stream);
-            libp2p_stream_free(stream);
-            goto cleanup;
-        }
-        free(data);
-        
-        fprintf(stderr, "[AUTONAT-V2] sending DialDataResponse with %llu bytes\n", (unsigned long long)ddr.num_bytes);
-        
-        if (write_lp_message(stream, ddr_msg.buf, ddr_msg.len) != 0) {
-            free(ddr_msg.buf);
-            result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
-            result->status_text = strdup("failed to write DialDataResponse");
-            libp2p_stream_close(stream);
-            libp2p_stream_free(stream);
-            goto cleanup;
-        }
-        free(ddr_msg.buf);
+        fprintf(stderr, "[AUTONAT-V2] finished sending %zu bytes of dial data\n", bytes_sent);
         
         /* Now read the actual DialResponse */
         if (read_lp_message(stream, resp_buf, sizeof(resp_buf), &resp_len, 30000) != 0) {
