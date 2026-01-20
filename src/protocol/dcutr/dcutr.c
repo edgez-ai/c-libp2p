@@ -917,6 +917,33 @@ static void dcutr_on_open(libp2p_stream_t *s, void *ud)
 
 /* ----------------------- event handler for address discovery ----------------------- */
 
+/* Helper to duplicate a peer_id_t */
+static peer_id_t *dcutr_peer_id_dup(const peer_id_t *src)
+{
+    if (!src || !src->bytes || src->size == 0)
+        return NULL;
+    peer_id_t *dst = (peer_id_t *)calloc(1, sizeof(*dst));
+    if (!dst)
+        return NULL;
+    dst->bytes = (uint8_t *)malloc(src->size);
+    if (!dst->bytes)
+    {
+        free(dst);
+        return NULL;
+    }
+    memcpy(dst->bytes, src->bytes, src->size);
+    dst->size = src->size;
+    return dst;
+}
+
+static void dcutr_peer_id_free(peer_id_t *pid)
+{
+    if (!pid)
+        return;
+    free(pid->bytes);
+    free(pid);
+}
+
 /* Context for async DCUtR upgrade worker */
 typedef struct dcutr_auto_upgrade_ctx
 {
@@ -938,7 +965,7 @@ static void *dcutr_auto_upgrade_worker(void *arg)
     if (!svc || !peer)
     {
         if (peer)
-            peer_id_destroy(peer);
+            dcutr_peer_id_free(peer);
         return NULL;
     }
 
@@ -960,7 +987,7 @@ static void *dcutr_auto_upgrade_worker(void *arg)
         fprintf(stderr, "[DCUTR] auto-upgrade FAILED for peer=%s (rc=%d)\n", peer_str, rc);
     }
 
-    peer_id_destroy(peer);
+    dcutr_peer_id_free(peer);
     return NULL;
 }
 
@@ -1007,7 +1034,7 @@ static void dcutr_event_handler(const libp2p_event_t *evt, void *user_data)
                 if (ctx)
                 {
                     ctx->svc = svc;
-                    ctx->peer = peer_id_copy(peer);
+                    ctx->peer = dcutr_peer_id_dup(peer);
                     if (ctx->peer)
                     {
                         pthread_t th;
@@ -1017,7 +1044,7 @@ static void dcutr_event_handler(const libp2p_event_t *evt, void *user_data)
                         }
                         else
                         {
-                            peer_id_destroy(ctx->peer);
+                            dcutr_peer_id_free(ctx->peer);
                             free(ctx);
                         }
                     }
