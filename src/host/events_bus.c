@@ -398,11 +398,8 @@ static void *event_dispatch_thread(void *arg)
         if (uds)
             free(uds);
         /* Free deep-copied event */
-        fprintf(stderr, "[EVENTS] DEBUG: freeing event kind=%d\n", dn->evt.kind);
         libp2p_event_free(&dn->evt);
-        fprintf(stderr, "[EVENTS] DEBUG: event freed, freeing node\n");
         free(dn);
-        fprintf(stderr, "[EVENTS] DEBUG: dispatch cycle complete\n");
     }
     return NULL;
 }
@@ -692,16 +689,11 @@ void libp2p_event_free(libp2p_event_t *evt)
             evt->u.error.msg = NULL;
             break;
         case LIBP2P_EVT_RELAY_CONN_ACCEPTED:
-            fprintf(stderr, "[EVENTS] DEBUG: freeing RELAY_CONN_ACCEPTED event, peer=%p\n", 
-                    (void*)evt->u.relay_conn_accepted.peer);
             if (evt->u.relay_conn_accepted.peer)
             {
-                fprintf(stderr, "[EVENTS] DEBUG: calling peer_id_destroy\n");
                 peer_id_destroy((peer_id_t *)evt->u.relay_conn_accepted.peer);
-                fprintf(stderr, "[EVENTS] DEBUG: calling free on peer\n");
                 free((void *)evt->u.relay_conn_accepted.peer);
                 evt->u.relay_conn_accepted.peer = NULL;
-                fprintf(stderr, "[EVENTS] DEBUG: RELAY_CONN_ACCEPTED peer freed\n");
             }
             break;
         default:
