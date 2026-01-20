@@ -977,7 +977,9 @@ static void *dcutr_auto_upgrade_worker(void *arg)
 
     fprintf(stderr, "[DCUTR] auto-initiating upgrade for relay connection to peer=%s\n", peer_str);
 
+    fprintf(stderr, "[DCUTR] DEBUG: calling libp2p_dcutr_upgrade...\n");
     int rc = libp2p_dcutr_upgrade(svc, peer, svc->opts.hole_punch_timeout_ms);
+    fprintf(stderr, "[DCUTR] DEBUG: libp2p_dcutr_upgrade returned %d\n", rc);
     if (rc == 0)
     {
         fprintf(stderr, "[DCUTR] auto-upgrade SUCCESS for peer=%s\n", peer_str);
@@ -987,7 +989,9 @@ static void *dcutr_auto_upgrade_worker(void *arg)
         fprintf(stderr, "[DCUTR] auto-upgrade FAILED for peer=%s (rc=%d)\n", peer_str, rc);
     }
 
+    fprintf(stderr, "[DCUTR] DEBUG: freeing peer...\n");
     dcutr_peer_id_free(peer);
+    fprintf(stderr, "[DCUTR] DEBUG: worker thread exiting normally\n");
     return NULL;
 }
 
@@ -1270,6 +1274,8 @@ int libp2p_dcutr_upgrade(libp2p_dcutr_service_t *svc, const peer_id_t *peer, int
     char **our_addrs = get_observed_addrs_locked(svc, &num_our_addrs);
     pthread_mutex_unlock(&svc->mtx);
 
+    fprintf(stderr, "[DCUTR] DEBUG: got %zu observed addresses\n", num_our_addrs);
+
     if (!our_addrs || num_our_addrs == 0)
     {
         fprintf(stderr, "[DCUTR] no observed addresses available\n");
@@ -1277,15 +1283,21 @@ int libp2p_dcutr_upgrade(libp2p_dcutr_service_t *svc, const peer_id_t *peer, int
         return LIBP2P_ERR_INTERNAL;
     }
 
+    fprintf(stderr, "[DCUTR] DEBUG: calling libp2p_host_open_stream...\n");
+
     /* Open DCUtR stream to peer using callback pattern */
     dcutr_open_ctx_t open_ctx = {0};
     int rc = libp2p_host_open_stream(svc->host, peer, LIBP2P_DCUTR_PROTO_ID,
                                       dcutr_on_stream_open, &open_ctx);
+    fprintf(stderr, "[DCUTR] DEBUG: libp2p_host_open_stream returned rc=%d, cb_rc=%d, s=%p\n", 
+            rc, open_ctx.rc, (void*)open_ctx.s);
     if (rc != 0 || open_ctx.rc != 0 || !open_ctx.s)
     {
         fprintf(stderr, "[DCUTR] failed to open stream to peer=%s (rc=%d, cb_rc=%d)\n", 
                 peer_str, rc, open_ctx.rc);
+        fprintf(stderr, "[DCUTR] DEBUG: freeing addr array and returning error\n");
         free_addr_array(our_addrs, num_our_addrs);
+        fprintf(stderr, "[DCUTR] DEBUG: addr array freed, returning\n");
         return rc != 0 ? rc : (open_ctx.rc != 0 ? open_ctx.rc : LIBP2P_ERR_INTERNAL);
     }
     libp2p_stream_t *s = open_ctx.s;
