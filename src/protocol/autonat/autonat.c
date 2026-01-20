@@ -134,6 +134,14 @@ typedef struct {
     uint64_t nonce;
 } dial_back_t;
 
+/* Observed address node */
+typedef struct observed_addr_node {
+    char *addr;
+    struct observed_addr_node *next;
+} observed_addr_node_t;
+
+#define AUTONAT_MAX_OBSERVED_ADDRS 16
+
 /* Pending dial-back tracking for client */
 typedef struct pending_dial_back {
     uint64_t nonce;
@@ -159,9 +167,16 @@ struct libp2p_autonat_service {
     libp2p_autonat_reachability_cb reachability_cb;
     void *reachability_cb_user_data;
     
+    /* Observed addresses (external addresses as seen by peers) */
+    observed_addr_node_t *observed_addrs;
+    size_t num_observed_addrs;
+    
     /* Pending dial-backs (client side) */
     pending_dial_back_t *pending_dial_backs;
     pthread_mutex_t pending_mtx;
+    
+    /* Event subscription for address discovery */
+    struct libp2p_subscription *event_sub;
     
     /* Probe thread */
     pthread_t probe_thread;
@@ -174,6 +189,9 @@ struct libp2p_autonat_service {
     
     pthread_mutex_t mtx;
 };
+
+/* Forward declaration */
+static void autonat_event_handler(const libp2p_event_t *evt, void *user_data);
 
 /* ----------------------- protobuf helpers ----------------------- */
 
@@ -1023,8 +1041,11 @@ static int probe_peer_v2(libp2p_autonat_service_t *svc, const peer_id_t *peer,
     svc->pending_dial_backs = pdb;
     pthread_mutex_unlock(&svc->pending_mtx);
     
-    fprintf(stderr, "[AUTONAT-V2] probing peer via %s with nonce=%llu\n", 
-            peer_addr, (unsigned long long)nonce);
+    fprintf(stderr, "[AUTONAT-V2] probing peer via %s with nonce=%llu, %zu addrs\n", 
+            peer_addr, (unsigned long long)nonce, num_addrs);
+    for (size_t i = 0; i < num_addrs; i++) {
+        fprintf(stderr, "[AUTONAT-V2]   addr[%zu]: %s\n", i, our_addrs[i]);
+    }
     
     /* Build DialRequest message */
     pb_buf_t msg = {0};
@@ -1033,13 +1054,46 @@ static int probe_peer_v2(libp2p_autonat_service_t *svc, const peer_id_t *peer,
         goto cleanup;
     }
     
-    /* Open stream to peer */
-    /* Note: This requires a blocking stream open - simplified for now */
-    fprintf(stderr, "[AUTONAT-V2] TODO: implement stream open to %s\n", peer_addr);
+    /* We need to open a stream synchronously. Use the host's async open with blocking wait. */
+    /* For now, use a simpler approach - check if peer supports autonat v2 first */
     
-    /* For now, mark as dial error since we can't complete the probe */
+    /* Check if peer supports the autonat v2 dial-request protocol */
+    const char **protocols = NULL;
+    size_t num_protocols = 0;
+    if (svc->host->peerstore) {
+        int rc = libp2p_peerstore_get_protocols(svc->host->peerstore, peer, &protocols, &num_protocols);
+        if (rc == 0 && protocols) {
+            int supports_v2 = 0;
+            for (size_t i = 0; i < num_protocols; i++) {
+                if (protocols[i] && strcmp(protocols[i], AUTONAT_V2_DIAL_REQUEST_PROTO) == 0) {
+                    supports_v2 = 1;
+                    break;
+                }
+            }
+            libp2p_peerstore_free_protocols(protocols, num_protocols);
+            
+            if (!supports_v2) {
+                fprintf(stderr, "[AUTONAT-V2] peer does not support %s\n", AUTONAT_V2_DIAL_REQUEST_PROTO);
+                result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_REFUSED;
+                result->status_text = strdup("peer does not support autonat v2");
+                free(msg.buf);
+                goto cleanup;
+            }
+        }
+    }
+    
+    fprintf(stderr, "[AUTONAT-V2] peer supports autonat v2, but async stream open not yet implemented\n");
+    
+    /* TODO: Implement actual stream open and message exchange:
+     * 1. libp2p_host_open_stream_async() to peer with AUTONAT_V2_DIAL_REQUEST_PROTO
+     * 2. In on_open callback, write the DialRequest message
+     * 3. Read DialResponse (may include DialDataRequest first for amplification prevention)
+     * 4. Meanwhile, wait for dial-back on pdb->cv with timeout
+     * 5. If dial-back received with matching nonce, address is reachable
+     */
+    
     result->status = LIBP2P_AUTONAT_STATUS_E_DIAL_ERROR;
-    result->status_text = strdup("probe not fully implemented");
+    result->status_text = strdup("stream open not yet implemented");
     
     free(msg.buf);
     
@@ -1063,6 +1117,164 @@ cleanup:
     return 0;
 }
 
+/* Helper to get connected peer IDs from host sessions */
+static int get_connected_peers(libp2p_autonat_service_t *svc, peer_id_t ***out_peers, size_t *out_count)
+{
+    if (!svc || !svc->host || !out_peers || !out_count) return -1;
+    
+    *out_peers = NULL;
+    *out_count = 0;
+    
+    pthread_mutex_lock(&svc->host->mtx);
+    
+    /* Count sessions */
+    size_t count = 0;
+    session_node_t *sess = svc->host->sessions;
+    while (sess) {
+        if (sess->remote_peer) count++;
+        sess = sess->next;
+    }
+    
+    if (count == 0) {
+        pthread_mutex_unlock(&svc->host->mtx);
+        return 0;
+    }
+    
+    /* Allocate array */
+    peer_id_t **peers = (peer_id_t **)calloc(count, sizeof(peer_id_t *));
+    if (!peers) {
+        pthread_mutex_unlock(&svc->host->mtx);
+        return -1;
+    }
+    
+    /* Copy peer IDs */
+    size_t i = 0;
+    sess = svc->host->sessions;
+    while (sess && i < count) {
+        if (sess->remote_peer) {
+            peers[i] = (peer_id_t *)malloc(sizeof(peer_id_t));
+            if (peers[i]) {
+                peers[i]->bytes = (uint8_t *)malloc(sess->remote_peer->len);
+                if (peers[i]->bytes) {
+                    memcpy(peers[i]->bytes, sess->remote_peer->bytes, sess->remote_peer->len);
+                    peers[i]->len = sess->remote_peer->len;
+                    i++;
+                } else {
+                    free(peers[i]);
+                }
+            }
+        }
+        sess = sess->next;
+    }
+    
+    pthread_mutex_unlock(&svc->host->mtx);
+    
+    *out_peers = peers;
+    *out_count = i;
+    return 0;
+}
+
+static void free_peer_list(peer_id_t **peers, size_t count)
+{
+    if (!peers) return;
+    for (size_t i = 0; i < count; i++) {
+        if (peers[i]) {
+            free(peers[i]->bytes);
+            free(peers[i]);
+        }
+    }
+    free(peers);
+}
+
+/* Helper to get our public addresses to test (prefer observed addrs, fallback to listen addrs) */
+static char **get_our_public_addrs(libp2p_autonat_service_t *svc, size_t *out_count)
+{
+    if (!svc || !svc->host || !out_count) return NULL;
+    
+    *out_count = 0;
+    char **addrs = NULL;
+    size_t cap = 0;
+    
+    /* First, try to use observed addresses (these are our public addresses as seen by peers) */
+    pthread_mutex_lock(&svc->mtx);
+    observed_addr_node_t *obs = svc->observed_addrs;
+    while (obs) {
+        if (obs->addr && !is_private_addr(obs->addr)) {
+            if (*out_count >= cap) {
+                size_t new_cap = cap ? cap * 2 : 8;
+                char **new_addrs = (char **)realloc(addrs, new_cap * sizeof(char *));
+                if (!new_addrs) break;
+                addrs = new_addrs;
+                cap = new_cap;
+            }
+            addrs[(*out_count)++] = strdup(obs->addr);
+        }
+        obs = obs->next;
+    }
+    pthread_mutex_unlock(&svc->mtx);
+    
+    /* If we have observed addresses, use those */
+    if (*out_count > 0) {
+        return addrs;
+    }
+    
+    /* Fallback: Get listen addresses from listeners (useful for testing on public server) */
+    pthread_mutex_lock(&svc->host->mtx);
+    struct listener_node *ln = svc->host->listeners;
+    while (ln) {
+        if (ln->addr_str && !is_private_addr(ln->addr_str)) {
+            if (*out_count >= cap) {
+                size_t new_cap = cap ? cap * 2 : 8;
+                char **new_addrs = (char **)realloc(addrs, new_cap * sizeof(char *));
+                if (!new_addrs) break;
+                addrs = new_addrs;
+                cap = new_cap;
+            }
+            addrs[(*out_count)++] = strdup(ln->addr_str);
+        }
+        ln = ln->next;
+    }
+    pthread_mutex_unlock(&svc->host->mtx);
+    
+    /* If still no public addresses, we're behind NAT and need observed addresses.
+     * Return local addresses for debugging purposes only. */
+    if (*out_count == 0) {
+        fprintf(stderr, "[AUTONAT-V2] WARNING: no observed public addresses available\n");
+        fprintf(stderr, "[AUTONAT-V2] waiting for Identify to provide observedAddr\n");
+    }
+    
+    return addrs;
+}
+
+static void free_addr_list(char **addrs, size_t count)
+{
+    if (!addrs) return;
+    for (size_t i = 0; i < count; i++)
+        free(addrs[i]);
+    free(addrs);
+}
+
+/* ----------------------- event handler for address discovery ----------------------- */
+
+static void autonat_event_handler(const libp2p_event_t *evt, void *user_data)
+{
+    libp2p_autonat_service_t *svc = (libp2p_autonat_service_t *)user_data;
+    if (!svc || !evt)
+        return;
+
+    if (evt->kind == LIBP2P_EVT_NEW_EXTERNAL_ADDR_CANDIDATE ||
+        evt->kind == LIBP2P_EVT_EXTERNAL_ADDR_CONFIRMED)
+    {
+        const char *addr = (evt->kind == LIBP2P_EVT_NEW_EXTERNAL_ADDR_CANDIDATE)
+                               ? evt->u.new_external_addr_candidate.addr
+                               : evt->u.external_addr_confirmed.addr;
+        if (addr && !is_private_addr(addr))
+        {
+            libp2p_autonat_add_observed_addr(svc, addr);
+        }
+    }
+}
+
 /* ----------------------- probe thread ----------------------- */
 
 static void *autonat_v2_probe_thread(void *arg)
@@ -1071,6 +1283,7 @@ static void *autonat_v2_probe_thread(void *arg)
     if (!svc) return NULL;
     
     /* Boot delay */
+    fprintf(stderr, "[AUTONAT-V2] boot delay %d ms\n", svc->opts.boot_delay_ms);
     usleep((useconds_t)svc->opts.boot_delay_ms * 1000);
     
     while (!svc->stop_requested) {
@@ -1081,6 +1294,76 @@ static void *autonat_v2_probe_thread(void *arg)
         
         fprintf(stderr, "[AUTONAT-V2] probe cycle (reachability=%d, success=%d, failure=%d)\n",
                 svc->reachability, svc->success_count, svc->failure_count);
+        
+        /* Get connected peers */
+        peer_id_t **peers = NULL;
+        size_t num_peers = 0;
+        if (get_connected_peers(svc, &peers, &num_peers) == 0 && num_peers > 0) {
+            fprintf(stderr, "[AUTONAT-V2] found %zu connected peers\n", num_peers);
+            
+            /* Get our addresses to test */
+            size_t num_addrs = 0;
+            char **our_addrs = get_our_public_addrs(svc, &num_addrs);
+            
+            if (our_addrs && num_addrs > 0) {
+                fprintf(stderr, "[AUTONAT-V2] have %zu addresses to test\n", num_addrs);
+                
+                /* Try to probe each peer until we get enough confirmations */
+                for (size_t i = 0; i < num_peers && !svc->stop_requested; i++) {
+                    /* Skip if we already have enough confirmations */
+                    if (svc->success_count >= svc->opts.min_confirmations)
+                        break;
+                    
+                    /* Get peer's address from peerstore */
+                    const multiaddr_t **peer_addrs = NULL;
+                    size_t peer_num_addrs = 0;
+                    if (svc->host->peerstore) {
+                        libp2p_peerstore_get_addrs(svc->host->peerstore, peers[i], 
+                                                   &peer_addrs, &peer_num_addrs);
+                    }
+                    
+                    if (peer_addrs && peer_num_addrs > 0) {
+                        int ma_err = 0;
+                        char *peer_addr = multiaddr_to_str((multiaddr_t *)peer_addrs[0], &ma_err);
+                        if (peer_addr) {
+                            libp2p_autonat_dial_result_t result = {0};
+                            probe_peer_v2(svc, peers[i], peer_addr, 
+                                         (const char *const *)our_addrs, num_addrs, &result);
+                            
+                            if (result.status == LIBP2P_AUTONAT_STATUS_OK) {
+                                pthread_mutex_lock(&svc->mtx);
+                                svc->success_count++;
+                                if (svc->success_count >= svc->opts.min_confirmations) {
+                                    svc->reachability = LIBP2P_AUTONAT_REACHABILITY_PUBLIC;
+                                    if (result.addr) {
+                                        free(svc->public_addr);
+                                        svc->public_addr = strdup(result.addr);
+                                    }
+                                }
+                                pthread_mutex_unlock(&svc->mtx);
+                            } else {
+                                pthread_mutex_lock(&svc->mtx);
+                                svc->failure_count++;
+                                pthread_mutex_unlock(&svc->mtx);
+                            }
+                            
+                            free(result.status_text);
+                            free(result.addr);
+                            free(peer_addr);
+                        }
+                        libp2p_peerstore_free_addrs(peer_addrs, peer_num_addrs);
+                    }
+                }
+                
+                free_addr_list(our_addrs, num_addrs);
+            } else {
+                fprintf(stderr, "[AUTONAT-V2] no addresses to test\n");
+            }
+            
+            free_peer_list(peers, num_peers);
+        } else {
+            fprintf(stderr, "[AUTONAT-V2] no connected peers to probe\n");
+        }
         
         /* Sleep until next probe interval */
         for (int i = 0; i < svc->opts.refresh_interval_ms / 1000 && !svc->stop_requested; i++) {
@@ -1155,6 +1438,14 @@ int libp2p_autonat_new(libp2p_host_t *host, const libp2p_autonat_opts_t *opts,
         }
     }
     
+    /* Subscribe to address discovery events (to learn our public addresses from Identify) */
+    rc = libp2p_event_subscribe(host, autonat_event_handler, svc, &svc->event_sub);
+    if (rc != 0) {
+        fprintf(stderr, "[AUTONAT-V2] warning: failed to subscribe to events (rc=%d)\n", rc);
+    } else {
+        fprintf(stderr, "[AUTONAT-V2] subscribed to address discovery events\n");
+    }
+    
     *out = svc;
     return 0;
 }
@@ -1200,6 +1491,11 @@ void libp2p_autonat_free(libp2p_autonat_service_t *svc)
     
     libp2p_autonat_stop(svc);
     
+    /* Unsubscribe from events */
+    if (svc->event_sub && svc->host) {
+        libp2p_event_unsubscribe(svc->host, svc->event_sub);
+    }
+    
     libp2p_unregister_protocol(svc->host, AUTONAT_V2_DIAL_BACK_PROTO);
     if (svc->opts.enable_service) {
         libp2p_unregister_protocol(svc->host, AUTONAT_V2_DIAL_REQUEST_PROTO);
@@ -1214,6 +1510,15 @@ void libp2p_autonat_free(libp2p_autonat_service_t *svc)
         free(pdb->received_addr);
         free(pdb);
         pdb = next;
+    }
+    
+    /* Free observed addresses */
+    observed_addr_node_t *obs = svc->observed_addrs;
+    while (obs) {
+        observed_addr_node_t *next = obs->next;
+        free(obs->addr);
+        free(obs);
+        obs = next;
     }
     
     free(svc->public_addr);
@@ -1292,5 +1597,101 @@ int libp2p_autonat_force_probe(libp2p_autonat_service_t *svc)
 {
     if (!svc) return LIBP2P_ERR_NULL_PTR;
     /* TODO: trigger immediate probe */
+    return 0;
+}
+
+int libp2p_autonat_add_observed_addr(libp2p_autonat_service_t *svc, const char *addr)
+{
+    if (!svc || !addr) return LIBP2P_ERR_NULL_PTR;
+    
+    pthread_mutex_lock(&svc->mtx);
+    
+    /* Check if already exists */
+    observed_addr_node_t *node = svc->observed_addrs;
+    while (node) {
+        if (node->addr && strcmp(node->addr, addr) == 0) {
+            pthread_mutex_unlock(&svc->mtx);
+            return 0; /* Already exists */
+        }
+        node = node->next;
+    }
+    
+    /* Limit max observed addresses */
+    if (svc->num_observed_addrs >= AUTONAT_MAX_OBSERVED_ADDRS) {
+        /* Remove oldest (last in list) */
+        if (svc->observed_addrs && svc->observed_addrs->next) {
+            observed_addr_node_t *prev = svc->observed_addrs;
+            while (prev->next && prev->next->next)
+                prev = prev->next;
+            free(prev->next->addr);
+            free(prev->next);
+            prev->next = NULL;
+            svc->num_observed_addrs--;
+        }
+    }
+    
+    /* Add new address at front */
+    observed_addr_node_t *new_node = (observed_addr_node_t *)calloc(1, sizeof(*new_node));
+    if (!new_node) {
+        pthread_mutex_unlock(&svc->mtx);
+        return LIBP2P_ERR_INTERNAL;
+    }
+    new_node->addr = strdup(addr);
+    if (!new_node->addr) {
+        free(new_node);
+        pthread_mutex_unlock(&svc->mtx);
+        return LIBP2P_ERR_INTERNAL;
+    }
+    new_node->next = svc->observed_addrs;
+    svc->observed_addrs = new_node;
+    svc->num_observed_addrs++;
+    
+    fprintf(stderr, "[AUTONAT-V2] added observed addr: %s (total=%zu)\n", addr, svc->num_observed_addrs);
+    
+    pthread_mutex_unlock(&svc->mtx);
+    return 0;
+}
+
+int libp2p_autonat_get_observed_addrs(libp2p_autonat_service_t *svc, char ***out_addrs, size_t *out_count)
+{
+    if (!svc || !out_addrs || !out_count) return LIBP2P_ERR_NULL_PTR;
+    
+    *out_addrs = NULL;
+    *out_count = 0;
+    
+    pthread_mutex_lock(&svc->mtx);
+    
+    if (svc->num_observed_addrs == 0 || !svc->observed_addrs) {
+        pthread_mutex_unlock(&svc->mtx);
+        return 0;
+    }
+    
+    char **addrs = (char **)calloc(svc->num_observed_addrs, sizeof(char *));
+    if (!addrs) {
+        pthread_mutex_unlock(&svc->mtx);
+        return LIBP2P_ERR_INTERNAL;
+    }
+    
+    size_t i = 0;
+    observed_addr_node_t *node = svc->observed_addrs;
+    while (node && i < svc->num_observed_addrs) {
+        if (node->addr) {
+            addrs[i] = strdup(node->addr);
+            if (!addrs[i]) {
+                for (size_t j = 0; j < i; j++)
+                    free(addrs[j]);
+                free(addrs);
+                pthread_mutex_unlock(&svc->mtx);
+                return LIBP2P_ERR_INTERNAL;
+            }
+            i++;
+        }
+        node = node->next;
+    }
+    
+    pthread_mutex_unlock(&svc->mtx);
+    
+    *out_addrs = addrs;
+    *out_count = i;
     return 0;
 }

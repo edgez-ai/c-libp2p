@@ -188,6 +188,30 @@ int libp2p_autonat_probe_peer(
  */
 int libp2p_autonat_force_probe(libp2p_autonat_service_t *svc);
 
+/**
+ * Add an observed address (external/public address as seen by peers).
+ * AutoNAT uses these to test if they are publicly reachable.
+ *
+ * @param svc The AutoNAT service handle
+ * @param addr The observed address string (e.g., from Identify observedAddr)
+ * @return 0 on success, negative error code on failure
+ */
+int libp2p_autonat_add_observed_addr(libp2p_autonat_service_t *svc, const char *addr);
+
+/**
+ * Get the list of observed addresses for the local node.
+ *
+ * @param svc The AutoNAT service handle
+ * @param out_addrs Output array of address strings (caller must free each and the array)
+ * @param out_count Output count of addresses
+ * @return 0 on success, negative error code on failure
+ */
+int libp2p_autonat_get_observed_addrs(
+    libp2p_autonat_service_t *svc,
+    char ***out_addrs,
+    size_t *out_count
+);
+
 #ifdef __cplusplus
 }
 #endif
