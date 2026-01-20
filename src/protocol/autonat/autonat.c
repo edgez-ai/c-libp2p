@@ -1154,10 +1154,10 @@ static int get_connected_peers(libp2p_autonat_service_t *svc, peer_id_t ***out_p
         if (sess->remote_peer) {
             peers[i] = (peer_id_t *)malloc(sizeof(peer_id_t));
             if (peers[i]) {
-                peers[i]->bytes = (uint8_t *)malloc(sess->remote_peer->len);
+                peers[i]->bytes = (uint8_t *)malloc(sess->remote_peer->size);
                 if (peers[i]->bytes) {
-                    memcpy(peers[i]->bytes, sess->remote_peer->bytes, sess->remote_peer->len);
-                    peers[i]->len = sess->remote_peer->len;
+                    memcpy(peers[i]->bytes, sess->remote_peer->bytes, sess->remote_peer->size);
+                    peers[i]->size = sess->remote_peer->size;
                     i++;
                 } else {
                     free(peers[i]);
