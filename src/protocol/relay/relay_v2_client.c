@@ -473,6 +473,13 @@ static void *relay_stop_worker(void *arg)
         return NULL;
     }
 
+    /* Log that we received an incoming STOP stream */
+    const peer_id_t *remote = libp2p_stream_remote_peer(s);
+    char peer_str[128] = {0};
+    if (remote)
+        peer_id_to_string(remote, PEER_ID_FMT_BASE58_LEGACY, peer_str, sizeof(peer_str));
+    fprintf(stderr, "[RELAY STOP] received incoming STOP stream from peer=%s\n", peer_str[0] ? peer_str : "(unknown)");
+
     libp2p_stream_set_read_interest(s, true);
 
     uint8_t buf[RELAY_V2_MAX_MSG_SIZE];
@@ -607,7 +614,9 @@ int libp2p_relay_v2_client_start(libp2p_host_t *host)
     def.read_mode = LIBP2P_READ_PULL;
     def.on_open = relay_stop_on_open;
     def.user_data = NULL;
-    return libp2p_register_protocol(host, &def);
+    int rc = libp2p_register_protocol(host, &def);
+    fprintf(stderr, "[RELAY] registered STOP protocol handler: %s (rc=%d)\n", LIBP2P_RELAY_V2_PROTO_STOP, rc);
+    return rc;
 }
 
 int libp2p_relay_v2_client_stop(libp2p_host_t *host)

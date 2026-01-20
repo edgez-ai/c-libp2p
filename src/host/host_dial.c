@@ -117,7 +117,50 @@ static void host_dial_quic_trace_end(
 typedef struct
 {
     libp2p_yamux_ctx_t *yctx;
+    libp2p_host_t *host;
+    peer_id_t *remote_peer; /* owned copy */
 } ob_loop_ctx_t;
+
+/* Forward declaration for inbound substream handler on outbound connections */
+static void *outbound_inbound_substream_worker(void *arg);
+
+/* Snapshot registered protocol IDs for multistream-select (same as host_listen.c) */
+static int ob_collect_supported_protocols(libp2p_host_t *host, const char ***out_ids, size_t *out_count)
+{
+    if (!host || !out_ids || !out_count)
+        return LIBP2P_ERR_NULL_PTR;
+
+    *out_ids = NULL;
+    *out_count = 0;
+
+    pthread_mutex_lock(&host->mtx);
+    size_t count = 0;
+    for (protocol_entry_t *e = host->protocols; e; e = e->next)
+        if (e->def.protocol_id)
+            count++;
+
+    const char **arr = NULL;
+    if (count > 0)
+    {
+        arr = (const char **)calloc(count + 1, sizeof(*arr));
+        if (!arr)
+        {
+            pthread_mutex_unlock(&host->mtx);
+            return LIBP2P_ERR_INTERNAL;
+        }
+        size_t idx = 0;
+        for (protocol_entry_t *e = host->protocols; e; e = e->next)
+        {
+            if (e->def.protocol_id)
+                arr[idx++] = e->def.protocol_id;
+        }
+    }
+    pthread_mutex_unlock(&host->mtx);
+
+    *out_ids = arr;
+    *out_count = count;
+    return 0;
+}
 
 static void *outbound_yamux_loop(void *arg)
 {
@@ -127,9 +170,228 @@ static void *outbound_yamux_loop(void *arg)
     if (ctx->yctx)
     {
         (void)libp2p_yamux_enable_keepalive(ctx->yctx, 15000);
-        (void)libp2p_yamux_process_loop(ctx->yctx);
+        /* Process frames one at a time, accepting inbound streams as they arrive */
+        atomic_store_explicit(&ctx->yctx->loop_active, true, memory_order_release);
+        while (!atomic_load_explicit(&ctx->yctx->stop, memory_order_acquire))
+        {
+            libp2p_yamux_err_t rc = libp2p_yamux_process_one(ctx->yctx);
+            if (rc == LIBP2P_YAMUX_ERR_AGAIN)
+            {
+                /* No frame yet, but check for accepted inbound streams */
+            }
+            else if (rc != LIBP2P_YAMUX_OK)
+            {
+                LP_LOGD("HOST_DIAL", "outbound_yamux_loop process_one error rc=%d", (int)rc);
+                break;
+            }
+
+            /* Accept and dispatch any inbound substreams (critical for relay STOP) */
+            for (;;)
+            {
+                libp2p_yamux_stream_t *yst = NULL;
+                if (libp2p_yamux_accept_stream(ctx->yctx, &yst) != LIBP2P_YAMUX_OK || !yst)
+                    break;
+
+                uint32_t sid = yst->id;
+                LP_LOGI("HOST_DIAL", "outbound conn: accepted inbound substream id=%u (dispatching)", sid);
+
+                /* Handle substream in a detached worker */
+                typedef struct
+                {
+                    ob_loop_ctx_t *ctx;
+                    uint32_t sid;
+                } ob_sub_work_t;
+                ob_sub_work_t *work = (ob_sub_work_t *)calloc(1, sizeof(*work));
+                if (!work)
+                {
+                    (void)libp2p_yamux_stream_reset(ctx->yctx, sid);
+                    continue;
+                }
+                work->ctx = ctx;
+                work->sid = sid;
+
+                if (ctx->host)
+                    libp2p__worker_inc(ctx->host);
+                pthread_t th;
+                if (pthread_create(&th, NULL, outbound_inbound_substream_worker, work) == 0)
+                {
+                    pthread_detach(th);
+                }
+                else
+                {
+                    if (ctx->host)
+                        libp2p__worker_dec(ctx->host);
+                    free(work);
+                    (void)libp2p_yamux_stream_reset(ctx->yctx, sid);
+                }
+            }
+        }
+        atomic_store_explicit(&ctx->yctx->loop_active, false, memory_order_release);
     }
+    /* Cleanup owned resources */
+    if (ctx->remote_peer)
+        peer_id_destroy(ctx->remote_peer);
     free(ctx);
+    return NULL;
+}
+
+/* Handle an inbound substream on an outbound connection (e.g., relay STOP protocol) */
+static void *outbound_inbound_substream_worker(void *arg)
+{
+    typedef struct
+    {
+        ob_loop_ctx_t *ctx;
+        uint32_t sid;
+    } ob_sub_work_t;
+    ob_sub_work_t *sw = (ob_sub_work_t *)arg;
+    if (!sw || !sw->ctx)
+    {
+        free(sw);
+        return NULL;
+    }
+    ob_loop_ctx_t *c = sw->ctx;
+    uint32_t sid = sw->sid;
+    free(sw);
+
+    if (!c->host || !c->yctx)
+    {
+        if (c->host)
+            libp2p__worker_dec(c->host);
+        return NULL;
+    }
+
+    /* Take a temporary reference on the yamux context */
+    libp2p_yamux_ctx_t *yref = c->yctx;
+    if (yref)
+        atomic_fetch_add_explicit(&yref->refcnt, 1, memory_order_acq_rel);
+
+    /* Snapshot supported protocols */
+    const char **supported = NULL;
+    size_t count = 0;
+    int sp_rc = ob_collect_supported_protocols(c->host, &supported, &count);
+    if (sp_rc != 0)
+    {
+        LP_LOGW("HOST_DIAL", "outbound inbound_substream: failed to collect protocols rc=%d", sp_rc);
+        if (yref)
+            (void)libp2p_yamux_stream_reset(yref, sid);
+        if (c->host)
+            libp2p__worker_dec(c->host);
+        if (yref)
+            libp2p_yamux_ctx_free(yref);
+        return NULL;
+    }
+    LP_LOGD("HOST_DIAL", "outbound inbound_substream: supported_count=%zu", count);
+    for (size_t i = 0; i < count; i++)
+        LP_LOGD("HOST_DIAL", "  supported[%zu]=%s", i, supported[i] ? supported[i] : "(null)");
+
+    /* Run multistream-select listen */
+    libp2p_multiselect_config_t cfg = libp2p_multiselect_config_default();
+    cfg.enable_ls = c->host->opts.multiselect_enable_ls;
+    cfg.handshake_timeout_ms = c->host->opts.multiselect_handshake_timeout_ms;
+
+    const char *accepted_heap = NULL;
+    libp2p_io_t *subio = libp2p_io_from_yamux(c->yctx, sid);
+    libp2p_multiselect_err_t ms = subio ? libp2p_multiselect_listen_io(subio, supported, &cfg, &accepted_heap)
+                                        : LIBP2P_MULTISELECT_ERR_INTERNAL;
+    LP_LOGD("HOST_DIAL", "outbound inbound_substream: multiselect_listen rc=%d accepted=%s", (int)ms,
+            accepted_heap ? accepted_heap : "(null)");
+    free((void *)supported);
+
+    if (ms != LIBP2P_MULTISELECT_OK)
+    {
+        LP_LOGW("HOST_DIAL", "outbound inbound_substream: multiselect failed rc=%d", (int)ms);
+        if (yref)
+            (void)libp2p_yamux_stream_reset(yref, sid);
+        if (subio)
+            libp2p_io_free(subio);
+        free((void *)accepted_heap);
+        if (c->host)
+            libp2p__worker_dec(c->host);
+        if (yref)
+            libp2p_yamux_ctx_free(yref);
+        return NULL;
+    }
+
+    /* Clone peer_id for the stream */
+    peer_id_t *peer_for_stream = NULL;
+    if (c->remote_peer && c->remote_peer->bytes && c->remote_peer->size)
+    {
+        peer_for_stream = (peer_id_t *)calloc(1, sizeof(*peer_for_stream));
+        if (peer_for_stream)
+        {
+            peer_for_stream->bytes = (uint8_t *)malloc(c->remote_peer->size);
+            if (peer_for_stream->bytes)
+            {
+                memcpy(peer_for_stream->bytes, c->remote_peer->bytes, c->remote_peer->size);
+                peer_for_stream->size = c->remote_peer->size;
+            }
+            else
+            {
+                free(peer_for_stream);
+                peer_for_stream = NULL;
+            }
+        }
+    }
+
+    /* Create stream object */
+    libp2p_stream_t *stream = libp2p_stream_from_yamux(c->host, yref, sid, accepted_heap, 0, peer_for_stream);
+    free((void *)accepted_heap);
+    if (!stream)
+    {
+        LP_LOGW("HOST_DIAL", "outbound inbound_substream: failed to create stream");
+        if (subio)
+            libp2p_io_free(subio);
+        if (peer_for_stream)
+            peer_id_destroy(peer_for_stream);
+        if (c->host)
+            libp2p__worker_dec(c->host);
+        if (yref)
+            libp2p_yamux_ctx_free(yref);
+        return NULL;
+    }
+    if (subio)
+        libp2p_io_free(subio);
+
+    libp2p__emit_protocol_negotiated(c->host, libp2p_stream_protocol_id(stream));
+    libp2p__emit_stream_opened(c->host, libp2p_stream_protocol_id(stream), libp2p_stream_remote_peer(stream), false);
+
+    /* Drop our temporary yctx reference; stream holds its own */
+    if (yref)
+        libp2p_yamux_ctx_free(yref);
+
+    /* Dispatch to protocol handler */
+    const char *incoming_id = libp2p_stream_protocol_id(stream);
+    LP_LOGI("HOST_DIAL", "outbound inbound_substream: dispatching protocol=%s", incoming_id ? incoming_id : "(null)");
+
+    libp2p_protocol_def_t chosen = {0};
+    int found = 0;
+    pthread_mutex_lock(&c->host->mtx);
+    for (protocol_entry_t *e = c->host->protocols; e && !found; e = e->next)
+    {
+        if (e->def.protocol_id && incoming_id && strcmp(e->def.protocol_id, incoming_id) == 0)
+        {
+            chosen = e->def;
+            found = 1;
+        }
+    }
+    pthread_mutex_unlock(&c->host->mtx);
+
+    if (!found || !chosen.on_open)
+    {
+        LP_LOGW("HOST_DIAL", "outbound inbound_substream: no handler for protocol=%s", incoming_id ? incoming_id : "(null)");
+        libp2p_stream_close(stream);
+        libp2p_stream_free(stream);
+        if (c->host)
+            libp2p__worker_dec(c->host);
+        return NULL;
+    }
+
+    /* Invoke protocol handler */
+    LP_LOGI("HOST_DIAL", "outbound inbound_substream: invoking on_open for protocol=%s", incoming_id);
+    chosen.on_open(stream, chosen.user_data, 0);
+
+    if (c->host)
+        libp2p__worker_dec(c->host);
     return NULL;
 }
 
@@ -1331,6 +1593,26 @@ static int do_dial_and_select(libp2p_host_t *host, const char *remote_multiaddr,
             if (ctx)
             {
                 ctx->yctx = yctx;
+                ctx->host = host;
+                /* Clone remote_peer for the loop context (needed for inbound substream handling) */
+                if (snode->remote_peer && snode->remote_peer->bytes && snode->remote_peer->size > 0)
+                {
+                    ctx->remote_peer = (peer_id_t *)calloc(1, sizeof(peer_id_t));
+                    if (ctx->remote_peer)
+                    {
+                        ctx->remote_peer->bytes = (uint8_t *)malloc(snode->remote_peer->size);
+                        if (ctx->remote_peer->bytes)
+                        {
+                            memcpy(ctx->remote_peer->bytes, snode->remote_peer->bytes, snode->remote_peer->size);
+                            ctx->remote_peer->size = snode->remote_peer->size;
+                        }
+                        else
+                        {
+                            free(ctx->remote_peer);
+                            ctx->remote_peer = NULL;
+                        }
+                    }
+                }
                 pthread_t th;
                 if (pthread_create(&th, NULL, outbound_yamux_loop, ctx) == 0)
                 {
@@ -1341,7 +1623,9 @@ static int do_dial_and_select(libp2p_host_t *host, const char *remote_multiaddr,
                 }
                 else
                 {
-                    /* If thread creation fails, keep session usable via recv pumping. */
+                    /* If thread creation fails, clean up and keep session usable via recv pumping. */
+                    if (ctx->remote_peer)
+                        peer_id_destroy(ctx->remote_peer);
                     free(ctx);
                 }
             }
