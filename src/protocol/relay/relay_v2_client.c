@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #include "host_internal.h"
 #include "libp2p/errors.h"
@@ -14,6 +15,7 @@
 #include "libp2p/stream_internal.h"
 #include "multiformats/unsigned_varint/unsigned_varint.h"
 #include "peer_id/peer_id.h"
+#include "protocol/tcp/protocol_tcp_util.h"
 #include "transport/connection.h"
 
 #define RELAY_V2_MAX_MSG_SIZE 4096
@@ -669,8 +671,25 @@ int libp2p_relay_v2_reserve_keep_stream(libp2p_host_t *host, const char *relay_m
         return LIBP2P_ERR_INTERNAL;
     }
 
+    /* Retry loop for reading response - libp2p_lp_recv returns AGAIN immediately
+     * if no data is available yet. We need to keep trying until data arrives
+     * or we hit our timeout. */
     uint8_t buf[RELAY_V2_MAX_MSG_SIZE];
-    ssize_t n = libp2p_lp_recv(s, buf, sizeof(buf));
+    ssize_t n;
+    uint64_t deadline = now_mono_ms() + RELAY_V2_HANDSHAKE_TIMEOUT_MS;
+    for (;;)
+    {
+        n = libp2p_lp_recv(s, buf, sizeof(buf));
+        if (n != LIBP2P_ERR_AGAIN)
+            break;
+        if (now_mono_ms() >= deadline)
+        {
+            n = LIBP2P_ERR_TIMEOUT;
+            break;
+        }
+        /* Small sleep to avoid busy-waiting */
+        usleep(10000); /* 10ms */
+    }
     libp2p_stream_set_deadline(s, 0);
     if (n <= 0)
     {
