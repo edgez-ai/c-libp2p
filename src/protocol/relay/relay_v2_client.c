@@ -11,6 +11,7 @@
 #include "libp2p/events.h"
 #include "libp2p/log.h"
 #include "libp2p/lpmsg.h"
+#include "libp2p/peerstore.h"
 #include "libp2p/protocol.h"
 #include "libp2p/stream.h"
 #include "libp2p/stream_internal.h"
@@ -654,6 +655,42 @@ static void *relay_stop_worker(void *arg)
         if (host)
             libp2p__worker_dec(host);
         return NULL;
+    }
+
+    /* Add initiator peer to peerstore with relay circuit address so we can open streams to them */
+    if (initiator_peer && host && host->peerstore)
+    {
+        /* Get the relay server's address from the stream */
+        const multiaddr_t *relay_addr = libp2p_stream_remote_addr(s);
+        const peer_id_t *relay_peer = libp2p_stream_remote_peer(s);
+        if (relay_addr && relay_peer)
+        {
+            int ma_err = 0;
+            char *relay_addr_str = multiaddr_to_str(relay_addr, &ma_err);
+            char relay_peer_str[128] = {0};
+            char init_peer_str[128] = {0};
+            peer_id_to_string(relay_peer, PEER_ID_FMT_BASE58_LEGACY, relay_peer_str, sizeof(relay_peer_str));
+            peer_id_to_string(initiator_peer, PEER_ID_FMT_BASE58_LEGACY, init_peer_str, sizeof(init_peer_str));
+            
+            if (relay_addr_str && relay_peer_str[0] && init_peer_str[0])
+            {
+                /* Build circuit address: <relay_addr>/p2p/<relay_peer>/p2p-circuit/p2p/<initiator> */
+                char circuit_addr_str[512];
+                snprintf(circuit_addr_str, sizeof(circuit_addr_str), 
+                         "%s/p2p/%s/p2p-circuit/p2p/%s",
+                         relay_addr_str, relay_peer_str, init_peer_str);
+                
+                multiaddr_t *circuit_ma = multiaddr_new_from_str(circuit_addr_str, &ma_err);
+                if (circuit_ma)
+                {
+                    /* Add to peerstore with 5 minute TTL */
+                    libp2p_peerstore_add_addr(host->peerstore, initiator_peer, circuit_ma, 5 * 60 * 1000);
+                    fprintf(stderr, "[RELAY STOP] added initiator to peerstore: %s\n", circuit_addr_str);
+                    multiaddr_free(circuit_ma);
+                }
+            }
+            free(relay_addr_str);
+        }
     }
 
     /* Emit RELAY_CONN_ACCEPTED event for DCUtR to trigger upgrade */

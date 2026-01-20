@@ -1020,11 +1020,6 @@ static void dcutr_event_handler(const libp2p_event_t *evt, void *user_data)
             peer_id_to_string(peer, PEER_ID_FMT_BASE58_LEGACY, peer_str, sizeof(peer_str));
             fprintf(stderr, "[DCUTR] received RELAY_CONN_ACCEPTED event for peer=%s\n", peer_str);
 
-            /* NOTE: Per DCUtR spec, the initiator of the relay connection should initiate DCUtR.
-             * Since we're the responder (receiving the relay connection), we should wait for
-             * the initiator to open a DCUtR stream to us. Disabling auto-upgrade for now. */
-            fprintf(stderr, "[DCUTR] waiting for peer to initiate DCUtR (we are responder)\n");
-#if 0
             /* Check if we have observed addresses (meaning we're behind NAT) */
             pthread_mutex_lock(&svc->mtx);
             size_t num_addrs = svc->num_observed_addrs;
@@ -1032,7 +1027,11 @@ static void dcutr_event_handler(const libp2p_event_t *evt, void *user_data)
 
             if (num_addrs > 0)
             {
-                /* We're behind NAT - initiate DCUtR upgrade asynchronously */
+                /* We're behind NAT - initiate DCUtR upgrade asynchronously.
+                 * Note: Per spec the relay initiator should initiate DCUtR, but if they don't,
+                 * we can try to initiate it ourselves. The peer was added to peerstore 
+                 * with their relay circuit address by the STOP handler. */
+                fprintf(stderr, "[DCUTR] initiating upgrade (we have %zu observed addresses)\n", num_addrs);
                 dcutr_auto_upgrade_ctx_t *ctx = (dcutr_auto_upgrade_ctx_t *)calloc(1, sizeof(*ctx));
                 if (ctx)
                 {
@@ -1061,7 +1060,6 @@ static void dcutr_event_handler(const libp2p_event_t *evt, void *user_data)
             {
                 fprintf(stderr, "[DCUTR] no observed addresses yet, skipping auto-upgrade\n");
             }
-#endif
         }
     }
 }
