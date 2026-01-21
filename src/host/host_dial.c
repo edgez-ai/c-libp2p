@@ -1904,9 +1904,18 @@ int libp2p_host_open_stream(libp2p_host_t *host, const peer_id_t *peer, const ch
         
         libp2p_muxer_t *mx = NULL;
         peer_id_t *peer_copy = NULL;
+        int session_count = 0;
         pthread_mutex_lock(&host->mtx);
         for (session_node_t *sess = host->sessions; sess; sess = sess->next)
         {
+            session_count++;
+            char sess_peer_str[128] = {0};
+            if (sess->remote_peer)
+                peer_id_to_string(sess->remote_peer, PEER_ID_FMT_BASE58_LEGACY, sess_peer_str, sizeof(sess_peer_str));
+            fprintf(stderr, "[HOST OPEN_STREAM]   session[%d]: peer=%s mx=%p has_open_stream=%d\n",
+                    session_count, sess_peer_str[0] ? sess_peer_str : "(null)",
+                    (void*)sess->mx, (sess->mx && sess->mx->vt && sess->mx->vt->open_stream) ? 1 : 0);
+            
             if (!sess->mx || !sess->mx->vt || !sess->mx->vt->open_stream)
                 continue;
             if (!sess->remote_peer || !sess->remote_peer->bytes || !peer->bytes)
@@ -1920,6 +1929,7 @@ int libp2p_host_open_stream(libp2p_host_t *host, const peer_id_t *peer, const ch
             peer_copy = peer_id_dup(sess->remote_peer);
             break;
         }
+        fprintf(stderr, "[HOST OPEN_STREAM] checked %d sessions, found mx=%p\n", session_count, (void*)mx);
         pthread_mutex_unlock(&host->mtx);
         
         if (mx)
