@@ -324,15 +324,6 @@ struct libp2p_dcutr_service
     libp2p_subscription_t *event_sub;
 };
 
-/* ----------------------- time helpers ----------------------- */
-
-static uint64_t now_mono_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
-}
-
 /* ----------------------- address helpers ----------------------- */
 
 static int is_public_addr(const char *addr_str)
