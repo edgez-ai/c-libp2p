@@ -9,8 +9,8 @@
  *
  * Message format (protobuf):
  *   message HolePunch {
- *     enum Type { CONNECT = 0; SYNC = 1; }
- *     optional Type type = 1;
+ *     enum Type { CONNECT = 100; SYNC = 300; }
+ *     required Type type = 1;
  *     repeated bytes ObsAddrs = 2;
  *   }
  *
@@ -973,8 +973,15 @@ static void *dcutr_auto_upgrade_worker(void *arg)
     char peer_str[128] = {0};
     peer_id_to_string(peer, PEER_ID_FMT_BASE58_LEGACY, peer_str, sizeof(peer_str));
 
-    /* Small delay to let the relay connection stabilize */
-    usleep(500000); /* 500ms */
+    /* Delay to let the relay connection stabilize and give the remote peer
+     * time to discover its observed addresses via identify and register
+     * the DCUtR handler. The remote peer's waitForPublicAddr() polls every
+     * 250ms, so we need to wait long enough for:
+     * 1. Identify exchange to complete (~100ms)
+     * 2. Observed address to be added
+     * 3. waitForPublicAddr() to poll and register handler (up to 250ms)
+     * Using 2 seconds to be safe. */
+    usleep(2000000); /* 2 seconds */
 
     fprintf(stderr, "[DCUTR] auto-initiating upgrade for relay connection to peer=%s\n", peer_str);
 

@@ -19,11 +19,12 @@ extern "C"
 
 /**
  * DCUtR message types.
+ * Per libp2p DCUtR spec: https://github.com/libp2p/specs/blob/master/relay/DCUtR.md
  */
 typedef enum
 {
-    LIBP2P_DCUTR_MSG_CONNECT = 0,
-    LIBP2P_DCUTR_MSG_SYNC = 1
+    LIBP2P_DCUTR_MSG_CONNECT = 100,
+    LIBP2P_DCUTR_MSG_SYNC = 300
 } libp2p_dcutr_msg_type_t;
 
 /**
