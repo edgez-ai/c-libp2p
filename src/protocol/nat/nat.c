@@ -274,6 +274,7 @@ static void log_interfaces_ipv4(void)
     if (getifaddrs(&ifaddr) != 0)
     {
         LP_LOGW("NAT", "getifaddrs failed: %s", strerror(errno));
+        fprintf(stderr, "[NAT] getifaddrs failed: %s\n", strerror(errno));
         return;
     }
 
@@ -289,6 +290,7 @@ static void log_interfaces_ipv4(void)
         if (inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip)))
         {
             LP_LOGI("NAT", "iface %s IPv4 %s flags=0x%x", ifa->ifa_name, ip, (unsigned int)ifa->ifa_flags);
+            fprintf(stderr, "[NAT] iface %s IPv4 %s flags=0x%x\n", ifa->ifa_name, ip, (unsigned int)ifa->ifa_flags);
         }
     }
 
@@ -1122,6 +1124,7 @@ int libp2p_nat_start(libp2p_nat_service_t *svc)
     if (!svc)
         return LIBP2P_NAT_ERR_NULL_PTR;
     
+    fprintf(stderr, "[NAT] libp2p_nat_start called\n");
     pthread_mutex_lock(&svc->mtx);
     
     if (svc->status == LIBP2P_NAT_STATUS_ACTIVE)
