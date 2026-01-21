@@ -425,20 +425,53 @@ static int upnp_discover_gateway(libp2p_nat_service_t *svc, int timeout_ms)
             fprintf(stderr, "[NAT] SSDP response from %s:%u (%zd bytes)\n",
                     from_ip, ntohs(from.sin_port), n);
         }
+
+        /* Log first line and key headers for debugging */
+        {
+            char *line_end = strstr(response, "\r\n");
+            if (line_end)
+            {
+                size_t line_len = (size_t)(line_end - response);
+                if (line_len > 200)
+                    line_len = 200;
+                fprintf(stderr, "[NAT] SSDP status: %.*s\n", (int)line_len, response);
+            }
+            char *loc = find_header(response, "LOCATION");
+            if (loc)
+            {
+                fprintf(stderr, "[NAT] SSDP LOCATION: %s\n", loc);
+                free(loc);
+            }
+            char *st = find_header(response, "ST");
+            if (st)
+            {
+                fprintf(stderr, "[NAT] SSDP ST: %s\n", st);
+                free(st);
+            }
+        }
         
         /* Check if this is a valid UPnP response */
         if (strstr(response, "200 OK") == NULL)
+        {
+            fprintf(stderr, "[NAT] SSDP ignored: missing 200 OK\n");
             continue;
+        }
         
         /* Look for WANIPConnection or WANPPPConnection */
         if (strstr(response, "WANIPConnection") == NULL &&
             strstr(response, "WANPPPConnection") == NULL)
+        {
+            fprintf(stderr, "[NAT] SSDP ignored: no WANIP/WANPPP in response\n");
             continue;
+        }
         
         /* Extract location URL */
         char *location = find_header(response, "LOCATION");
         if (!location)
+        {
+            fprintf(stderr, "[NAT] SSDP ignored: no LOCATION header\n");
             continue;
+        }
         
         LP_LOGI("NAT", "Found UPnP gateway at %s", location);
         
