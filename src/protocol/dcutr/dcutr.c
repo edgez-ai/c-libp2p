@@ -413,9 +413,54 @@ static int parse_multiaddr_for_tcp(const char *addr_str, char *ip_out, size_t ip
 typedef struct
 {
     char addr[256];
+    int local_port;
     int success;
     int fd;
 } hole_punch_attempt_t;
+
+static int dcutr_get_listen_port(libp2p_dcutr_service_t *svc)
+{
+    if (!svc || !svc->host)
+        return 0;
+
+    /* First, try configured listen addrs. */
+    for (size_t i = 0; i < svc->host->opts.num_listen_addrs; i++)
+    {
+        const char *addr = svc->host->opts.listen_addrs[i];
+        if (!addr)
+            continue;
+        char ip_tmp[64] = {0};
+        int port = 0;
+        if (parse_multiaddr_for_tcp(addr, ip_tmp, sizeof(ip_tmp), &port) > 0 && port > 0)
+            return port;
+    }
+
+    /* Fallback: check bound listener addresses. */
+    for (listener_node_t *node = svc->host->listeners; node; node = node->next)
+    {
+        multiaddr_t *bound = NULL;
+        if (libp2p_listener_local_addr(node->lst, &bound) == 0 && bound)
+        {
+            int err = 0;
+            char *s = multiaddr_to_str(bound, &err);
+            if (s)
+            {
+                char ip_tmp[64] = {0};
+                int port = 0;
+                if (parse_multiaddr_for_tcp(s, ip_tmp, sizeof(ip_tmp), &port) > 0 && port > 0)
+                {
+                    free(s);
+                    multiaddr_free(bound);
+                    return port;
+                }
+                free(s);
+            }
+            multiaddr_free(bound);
+        }
+    }
+
+    return 0;
+}
 
 static void *hole_punch_worker(void *arg)
 {
@@ -447,6 +492,39 @@ static void *hole_punch_worker(void *arg)
 #ifdef SO_REUSEPORT
     setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 #endif
+
+    /* Bind to the local listen port for proper TCP hole punching */
+    if (attempt->local_port > 0)
+    {
+        int bind_rc = 0;
+        if (ip_ver == 4)
+        {
+            struct sockaddr_in laddr4;
+            memset(&laddr4, 0, sizeof(laddr4));
+            laddr4.sin_family = AF_INET;
+            laddr4.sin_addr.s_addr = htonl(INADDR_ANY);
+            laddr4.sin_port = htons((uint16_t)attempt->local_port);
+            bind_rc = bind(fd, (struct sockaddr *)&laddr4, sizeof(laddr4));
+        }
+        else
+        {
+            struct sockaddr_in6 laddr6;
+            memset(&laddr6, 0, sizeof(laddr6));
+            laddr6.sin6_family = AF_INET6;
+            laddr6.sin6_addr = in6addr_any;
+            laddr6.sin6_port = htons((uint16_t)attempt->local_port);
+            bind_rc = bind(fd, (struct sockaddr *)&laddr6, sizeof(laddr6));
+        }
+
+        if (bind_rc != 0)
+        {
+            fprintf(stderr, "[DCUTR] hole punch bind failed (port=%d): %s\n", attempt->local_port, strerror(errno));
+        }
+        else
+        {
+            fprintf(stderr, "[DCUTR] hole punch bound local port %d\n", attempt->local_port);
+        }
+    }
 
     /* Set non-blocking for timeout handling */
     int flags = fcntl(fd, F_GETFL, 0);
@@ -483,7 +561,7 @@ static void *hole_punch_worker(void *arg)
         addr_len = sizeof(*addr6);
     }
 
-    fprintf(stderr, "[DCUTR] attempting hole punch to %s:%d\n", ip, port);
+    fprintf(stderr, "[DCUTR] attempting hole punch to %s:%d (local_port=%d)\n", ip, port, attempt->local_port);
 
     int rc = connect(fd, (struct sockaddr *)&addr_storage, addr_len);
     if (rc == 0)
@@ -497,7 +575,16 @@ static void *hole_punch_worker(void *arg)
 
     if (errno != EINPROGRESS)
     {
-        fprintf(stderr, "[DCUTR] hole punch connect failed: %s\n", strerror(errno));
+        if (errno == ECONNREFUSED)
+        {
+            fprintf(stderr, "[DCUTR] hole punch connect refused to %s:%d (local_port=%d, errno=%d)\n",
+                    ip, port, attempt->local_port, errno);
+        }
+        else
+        {
+            fprintf(stderr, "[DCUTR] hole punch connect failed to %s:%d (local_port=%d, errno=%d): %s\n",
+                    ip, port, attempt->local_port, errno, strerror(errno));
+        }
         close(fd);
         return NULL;
     }
@@ -524,7 +611,16 @@ static void *hole_punch_worker(void *arg)
             fprintf(stderr, "[DCUTR] hole punch SUCCESS to %s\n", attempt->addr);
             return NULL;
         }
-        fprintf(stderr, "[DCUTR] hole punch connect error: %s\n", strerror(err));
+        if (err == ECONNREFUSED)
+        {
+            fprintf(stderr, "[DCUTR] hole punch connect refused to %s:%d (local_port=%d, errno=%d)\n",
+                    ip, port, attempt->local_port, err);
+        }
+        else
+        {
+            fprintf(stderr, "[DCUTR] hole punch connect error to %s:%d (local_port=%d, errno=%d): %s\n",
+                    ip, port, attempt->local_port, err, strerror(err));
+        }
     }
     else
     {
@@ -552,6 +648,13 @@ static int attempt_hole_punch(libp2p_dcutr_service_t *svc, const char *const *re
         return -1;
     }
 
+    /* Determine local bind port (listener) for simultaneous open */
+    int local_port = dcutr_get_listen_port(svc);
+    if (local_port <= 0)
+        fprintf(stderr, "[DCUTR] warning: no local listen port found; hole punch will use ephemeral port\n");
+    else
+        fprintf(stderr, "[DCUTR] using local listen port %d for hole punch\n", local_port);
+
     /* Small delay for coordination (TCP simultaneous open timing) */
     usleep(DCUTR_SIMULTANEOUS_CONNECT_DELAY_US);
 
@@ -560,6 +663,7 @@ static int attempt_hole_punch(libp2p_dcutr_service_t *svc, const char *const *re
     {
         snprintf(attempts[i].addr, sizeof(attempts[i].addr), "%s", remote_addrs[i]);
         attempts[i].fd = -1;
+        attempts[i].local_port = local_port;
         if (pthread_create(&threads[i], NULL, hole_punch_worker, &attempts[i]) != 0)
         {
             threads[i] = 0;

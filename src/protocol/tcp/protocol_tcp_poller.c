@@ -274,10 +274,12 @@ void *poll_loop(void *arg)
                     break; /* defer further accepts until consumer drains the queue */
                 }
                 int fd;
+                struct sockaddr_storage raddr;
+                socklen_t rlen = sizeof(raddr);
 #if defined(__linux__) && defined(SOCK_CLOEXEC)
-                fd = accept4(listener_ctx->fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+                fd = accept4(listener_ctx->fd, (struct sockaddr *)&raddr, &rlen, SOCK_CLOEXEC | SOCK_NONBLOCK);
 #else
-                fd = accept(listener_ctx->fd, NULL, NULL);
+                fd = accept(listener_ctx->fd, (struct sockaddr *)&raddr, &rlen);
                 if (fd >= 0)
                 {
                     if (fcntl(fd, F_SETFD, FD_CLOEXEC) == -1 || set_nonblocking(fd) == -1)
@@ -295,6 +297,11 @@ void *poll_loop(void *arg)
                     if (err == EAGAIN || err == EWOULDBLOCK)
                     {
                         break; /* backlog drained */
+                    }
+
+                    if (!TRANSIENT_ERR(err))
+                    {
+                        LP_LOGW("TCP", "accept failed errno=%d", err);
                     }
 
                     /* temporary back‑off on resource exhaustion */
@@ -323,6 +330,24 @@ void *poll_loop(void *arg)
                 }
 
                 accept_count++;
+
+                /* log inbound connection */
+                {
+                    char rhost[NI_MAXHOST] = "?";
+                    char rserv[NI_MAXSERV] = "?";
+                    if (getnameinfo((struct sockaddr *)&raddr, rlen, rhost, sizeof(rhost), rserv, sizeof(rserv),
+                                    NI_NUMERICHOST | NI_NUMERICSERV) != 0)
+                    {
+                        snprintf(rhost, sizeof(rhost), "?");
+                        snprintf(rserv, sizeof(rserv), "?");
+                    }
+                    int serr = 0;
+                    char *lstr = listener_ctx->local ? multiaddr_to_str(listener_ctx->local, &serr) : NULL;
+                    LP_LOGI("TCP", "accepted inbound connection remote=%s:%s local=%s fd=%d",
+                            rhost, rserv, lstr ? lstr : "(unknown)", fd);
+                    if (lstr)
+                        free(lstr);
+                }
 
                 /* TCP_NODELAY */
                 if (listener_ctx->transport_ctx->cfg.nodelay)
@@ -467,12 +492,18 @@ void *poll_loop(void *arg)
                         break;
                     }
 
-                    SOCKET s = accept(listener_ctx->fd, NULL, NULL);
+                    struct sockaddr_storage raddr;
+                    int rlen = sizeof(raddr);
+                    SOCKET s = accept(listener_ctx->fd, (struct sockaddr *)&raddr, &rlen);
                     if (s == INVALID_SOCKET)
                     {
                         int werr = WSAGetLastError();
                         if (werr == WSAEWOULDBLOCK)
                             break;
+                        if (werr != WSAEMFILE && werr != WSAENOBUFS)
+                        {
+                            LP_LOGW("TCP", "accept failed wsaerr=%d", werr);
+                        }
                         if ((werr == WSAEMFILE || werr == WSAENOBUFS) && !atomic_load_explicit(&listener_ctx->state.disabled, memory_order_acquire))
                         {
                             atomic_store_explicit(&listener_ctx->state.disabled, true, memory_order_release);
@@ -491,6 +522,24 @@ void *poll_loop(void *arg)
                     }
                     int fd = (int)s;
                     accept_count++;
+
+                    /* log inbound connection */
+                    {
+                        char rhost[NI_MAXHOST] = "?";
+                        char rserv[NI_MAXSERV] = "?";
+                        if (getnameinfo((struct sockaddr *)&raddr, rlen, rhost, sizeof(rhost), rserv, sizeof(rserv),
+                                        NI_NUMERICHOST | NI_NUMERICSERV) != 0)
+                        {
+                            snprintf(rhost, sizeof(rhost), "?");
+                            snprintf(rserv, sizeof(rserv), "?");
+                        }
+                        int serr = 0;
+                        char *lstr = listener_ctx->local ? multiaddr_to_str(listener_ctx->local, &serr) : NULL;
+                        LP_LOGI("TCP", "accepted inbound connection remote=%s:%s local=%s fd=%d",
+                                rhost, rserv, lstr ? lstr : "(unknown)", fd);
+                        if (lstr)
+                            free(lstr);
+                    }
                     if (set_nonblocking(fd) == -1)
                     {
                         closesocket(s);
