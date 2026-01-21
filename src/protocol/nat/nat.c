@@ -146,36 +146,37 @@ static void set_nonblocking(int fd)
 
 static char *find_header(const char *response, const char *header)
 {
-    char search[256];
-    snprintf(search, sizeof(search), "\r\n%s:", header);
-    
-    char *pos = strcasestr(response, search);
-    if (!pos)
+    if (!response || !header)
+        return NULL;
+
+    size_t hlen = strlen(header);
+    const char *p = response;
+    while (p && *p)
     {
-        /* Check at start of headers */
-        snprintf(search, sizeof(search), "%s:", header);
-        if (strncasecmp(response, search, strlen(search)) == 0)
-            pos = (char *)response - 2; /* Adjust for the \r\n we added */
-        else
-            return NULL;
+        const char *line_end = strstr(p, "\r\n");
+        size_t line_len = line_end ? (size_t)(line_end - p) : strlen(p);
+
+        if (line_len > hlen + 1 && strncasecmp(p, header, hlen) == 0 && p[hlen] == ':')
+        {
+            const char *val = p + hlen + 1;
+            while (*val == ' ' || *val == '\t')
+                val++;
+            size_t val_len = line_len - (size_t)(val - p);
+            char *result = malloc(val_len + 1);
+            if (result)
+            {
+                memcpy(result, val, val_len);
+                result[val_len] = '\0';
+            }
+            return result;
+        }
+
+        if (!line_end)
+            break;
+        p = line_end + 2;
     }
-    
-    pos += strlen(search) + 2; /* Skip header name and colon */
-    while (*pos == ' ' || *pos == '\t')
-        pos++;
-    
-    char *end = strstr(pos, "\r\n");
-    if (!end)
-        end = pos + strlen(pos);
-    
-    size_t len = end - pos;
-    char *result = malloc(len + 1);
-    if (result)
-    {
-        memcpy(result, pos, len);
-        result[len] = '\0';
-    }
-    return result;
+
+    return NULL;
 }
 
 static char *extract_xml_value(const char *xml, const char *tag)
