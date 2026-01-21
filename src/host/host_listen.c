@@ -1887,6 +1887,10 @@ int libp2p_host_start(libp2p_host_t *host)
                         if (v > 0 && v <= 65535)
                             requested_ext_port = (uint16_t)v;
                     }
+                    if (requested_ext_port)
+                    {
+                        LP_LOGI("NAT_PORT_MAP", "requesting external port %u via UPnP/NAT-PMP", requested_ext_port);
+                    }
 
                     /* Extract port from the bound address string */
                     uint16_t port = 0;

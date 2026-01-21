@@ -989,6 +989,7 @@ int libp2p_nat_start(libp2p_nat_service_t *svc)
     pthread_mutex_unlock(&svc->mtx);
     
     int ret = LIBP2P_NAT_ERR_NO_GATEWAY;
+    LP_LOGI("NAT", "Starting NAT discovery (protocol=%d)", svc->opts.protocol);
     
     /* Try discovery based on protocol preference */
     if (svc->opts.protocol == LIBP2P_NAT_PROTO_AUTO ||
@@ -1003,6 +1004,14 @@ int libp2p_nat_start(libp2p_nat_service_t *svc)
                 upnp_get_external_ip(svc);
                 svc->active_proto = LIBP2P_NAT_PROTO_UPNP;
             }
+            else
+            {
+                LP_LOGW("NAT", "UPnP fetch description failed: %d", ret);
+            }
+        }
+        else
+        {
+            LP_LOGW("NAT", "UPnP discovery failed: %d", ret);
         }
     }
     
@@ -1015,12 +1024,17 @@ int libp2p_nat_start(libp2p_nat_service_t *svc)
         {
             svc->active_proto = LIBP2P_NAT_PROTO_NATPMP;
         }
+        else
+        {
+            LP_LOGW("NAT", "NAT-PMP discovery failed: %d", ret);
+        }
     }
     
     pthread_mutex_lock(&svc->mtx);
     if (ret == LIBP2P_NAT_OK)
     {
         svc->status = LIBP2P_NAT_STATUS_ACTIVE;
+        LP_LOGI("NAT", "NAT discovery successful (active_proto=%d)", svc->active_proto);
         
         /* Start refresh thread if enabled */
         if (svc->opts.enable_auto_refresh)
@@ -1035,6 +1049,7 @@ int libp2p_nat_start(libp2p_nat_service_t *svc)
     else
     {
         svc->status = LIBP2P_NAT_STATUS_NOT_FOUND;
+        LP_LOGW("NAT", "NAT discovery failed; no gateway found");
     }
     pthread_mutex_unlock(&svc->mtx);
     
@@ -1121,6 +1136,8 @@ int libp2p_nat_add_mapping(libp2p_nat_service_t *svc,
     
     if (ret != LIBP2P_NAT_OK)
     {
+        LP_LOGW("NAT", "Port mapping failed (proto=%d, %s internal=%u external=%u): %d",
+                svc->active_proto, is_tcp ? "tcp" : "udp", internal_port, external_port, ret);
         pthread_mutex_unlock(&svc->mtx);
         return ret;
     }
