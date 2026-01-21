@@ -323,7 +323,7 @@ static int upnp_discover_gateway(libp2p_nat_service_t *svc, int timeout_ms)
     char iface_ip_buf[INET_ADDRSTRLEN] = {0};
 
     const char *preferred_ifaces[] = {
-        "eth0.1",
+        "br-ahwlan",
         "phy0-sta0"
     };
     for (size_t i = 0; i < sizeof(preferred_ifaces) / sizeof(preferred_ifaces[0]); i++)
