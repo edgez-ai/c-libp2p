@@ -1,4 +1,5 @@
 #include "libp2p/host_builder.h"
+#include "libp2p/nat.h"
 #include <stdlib.h>
 #include <string.h>
 #include "multiformats/multiaddr/multiaddr.h"
@@ -28,6 +29,7 @@ struct libp2p_host_builder
     int cm_grace_ms;
     uint32_t flags;
     int flags_set;
+    int nat_port_map_enabled;
 };
 
 /* --- Validation helpers -------------------------------------------------- */
@@ -206,6 +208,14 @@ int libp2p_host_builder_conn_manager(libp2p_host_builder_t *b, int low_water, in
     return 0;
 }
 
+int libp2p_host_builder_nat_port_map(libp2p_host_builder_t *b)
+{
+    if (!b)
+        return LIBP2P_ERR_NULL_PTR;
+    b->nat_port_map_enabled = 1;
+    return 0;
+}
+
 static size_t list_count(const list_node_t *n)
 {
     size_t c = 0;
@@ -348,6 +358,31 @@ cleanup_arrays:
         if (libp2p_conn_mgr_new(b->cm_low_water, b->cm_high_water, b->cm_grace_ms, &cm) == 0 && cm)
         {
             (void)libp2p_host_set_conn_manager(h, cm);
+        }
+    }
+
+    /* Initialize NAT port mapping if enabled */
+    if (b->nat_port_map_enabled)
+    {
+        libp2p_nat_opts_t nat_opts;
+        libp2p_nat_opts_default(&nat_opts);
+        
+        libp2p_nat_service_t *nat = NULL;
+        int nat_rc = libp2p_nat_new(&nat_opts, &nat);
+        if (nat_rc == 0 && nat)
+        {
+            /* Start NAT discovery */
+            nat_rc = libp2p_nat_start(nat);
+            if (nat_rc == 0)
+            {
+                /* Store NAT service in host for later use */
+                libp2p_host_set_nat_service(h, nat);
+            }
+            else
+            {
+                /* NAT discovery failed, cleanup but don't fail the build */
+                libp2p_nat_free(nat);
+            }
         }
     }
 

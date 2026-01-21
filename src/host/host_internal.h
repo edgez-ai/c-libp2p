@@ -8,6 +8,7 @@
 #include "libp2p/events.h"
 #include "libp2p/host.h"
 #include "libp2p/muxer.h"
+#include "libp2p/nat.h"
 #include "libp2p/peerstore.h"
 #include "libp2p/protocol.h"
 #include "libp2p/protocol_match.h"
@@ -205,6 +206,9 @@ struct libp2p_host
 
     /* Optional metrics sink */
     libp2p_metrics_t *metrics;
+
+    /* NAT port mapping service (UPnP/NAT-PMP) */
+    libp2p_nat_service_t *nat_service;
 
     /* Identify Push publication state (event-driven, no busy-wait) */
     int idpush_pending;   /* set when LOCAL_PROTOCOLS_UPDATED occurs or retry needed */

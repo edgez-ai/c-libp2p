@@ -28,6 +28,16 @@ int libp2p_host_builder_max_conns(libp2p_host_builder_t *b, int inbound, int out
 int libp2p_host_builder_per_conn_stream_caps(libp2p_host_builder_t *b, int inbound, int outbound);
 int libp2p_host_builder_conn_manager(libp2p_host_builder_t *b, int low_water, int high_water, int grace_ms);
 
+/**
+ * Enable NAT port mapping (UPnP/NAT-PMP).
+ * When enabled, the host will automatically discover and use UPnP IGD or NAT-PMP
+ * to map external ports for inbound connectivity.
+ * 
+ * @param b Builder instance
+ * @return 0 on success, error code otherwise
+ */
+int libp2p_host_builder_nat_port_map(libp2p_host_builder_t *b);
+
 int libp2p_host_builder_build(const libp2p_host_builder_t *b, libp2p_host_t **out);
 
 #ifdef __cplusplus

@@ -114,6 +114,11 @@ int libp2p_host_open_stream_async(libp2p_host_t *host, const peer_id_t *peer, co
 /* Optional: attach managers */
 int libp2p_host_set_conn_manager(libp2p_host_t *host, libp2p_conn_mgr_t *cm);
 
+/* Optional: attach NAT port mapping service */
+struct libp2p_nat_service; /* fwd */
+int libp2p_host_set_nat_service(libp2p_host_t *host, struct libp2p_nat_service *nat);
+struct libp2p_nat_service *libp2p_host_get_nat_service(const libp2p_host_t *host);
+
 /* Optional: attach metrics (counters/histograms) */
 struct libp2p_metrics; /* fwd */
 int libp2p_host_set_metrics(libp2p_host_t *host, struct libp2p_metrics *m);

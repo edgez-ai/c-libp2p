@@ -1874,6 +1874,48 @@ int libp2p_host_start(libp2p_host_t *host)
                 evt2.kind = LIBP2P_EVT_LISTEN_ADDR_ADDED;
                 evt2.u.listen_addr_added.addr = s2;
                 libp2p_event_publish(host, &evt2);
+                
+                /* Add NAT port mapping if NAT service is enabled */
+                if (host->nat_service)
+                {
+                    /* Extract port from the bound address string */
+                    uint16_t port = 0;
+                    const char *tcp_pos = strstr(s2, "/tcp/");
+                    if (tcp_pos)
+                    {
+                        port = (uint16_t)atoi(tcp_pos + 5);
+                        if (port > 0)
+                        {
+                            /* Map TCP port via UPnP/NAT-PMP */
+                            libp2p_nat_mapping_t *mapping = NULL;
+                            int map_rc = libp2p_nat_add_mapping(host->nat_service, LIBP2P_NAT_PROTO_TCP, 
+                                                                 port, port, &mapping);
+                            if (map_rc == 0 && mapping)
+                            {
+                                LP_LOGI("NAT_PORT_MAP", "mapped TCP port %u -> external %u", 
+                                        port, mapping->external_port);
+                            }
+                        }
+                    }
+                    const char *udp_pos = strstr(s2, "/udp/");
+                    if (udp_pos)
+                    {
+                        port = (uint16_t)atoi(udp_pos + 5);
+                        if (port > 0)
+                        {
+                            /* Map UDP port via UPnP/NAT-PMP */
+                            libp2p_nat_mapping_t *mapping = NULL;
+                            int map_rc = libp2p_nat_add_mapping(host->nat_service, LIBP2P_NAT_PROTO_UDP, 
+                                                                 port, port, &mapping);
+                            if (map_rc == 0 && mapping)
+                            {
+                                LP_LOGI("NAT_PORT_MAP", "mapped UDP port %u -> external %u", 
+                                        port, mapping->external_port);
+                            }
+                        }
+                    }
+                }
+                
                 free(s2);
             }
             multiaddr_free(bound);

@@ -565,6 +565,7 @@ add_library(libp2p_unified
     src/protocol/relay/relay_v2_client.c
     src/protocol/autonat/autonat.c
     src/protocol/dcutr/dcutr.c
+    src/protocol/nat/nat.c
     src/host/events_bus.c
     src/host/callback_exec.c
     src/host/proto_select.c

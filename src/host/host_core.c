@@ -556,6 +556,13 @@ void libp2p_host_free(libp2p_host_t *host)
     /* no resource manager to free */
     if (host->conn_mgr)
         libp2p_conn_mgr_free(host->conn_mgr);
+    /* free NAT port mapping service */
+    if (host->nat_service)
+    {
+        libp2p_nat_stop(host->nat_service);
+        libp2p_nat_free(host->nat_service);
+        host->nat_service = NULL;
+    }
     /* free per-protocol server configs */
     LP_LOGD("HOST_FREE", "freeing proto_cfgs");
     proto_server_cfg_t *pc = host->proto_cfgs;
@@ -650,6 +657,19 @@ int libp2p_host_set_conn_manager(libp2p_host_t *host, libp2p_conn_mgr_t *cm)
         return LIBP2P_ERR_NULL_PTR;
     host->conn_mgr = cm;
     return 0;
+}
+
+int libp2p_host_set_nat_service(libp2p_host_t *host, struct libp2p_nat_service *nat)
+{
+    if (!host)
+        return LIBP2P_ERR_NULL_PTR;
+    host->nat_service = nat;
+    return 0;
+}
+
+struct libp2p_nat_service *libp2p_host_get_nat_service(const libp2p_host_t *host)
+{
+    return host ? host->nat_service : NULL;
 }
 
 int libp2p_host_set_metrics(libp2p_host_t *host, struct libp2p_metrics *m)
