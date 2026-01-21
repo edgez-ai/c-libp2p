@@ -651,6 +651,25 @@ static void *inbound_session_thread(void *arg)
         ictx->snode->mx = mx;
         ictx->snode->conn = secured;
         ictx->snode->yamux_cb = cbctx;
+        /* Copy peer_id from cbctx template to session node for stream reuse lookups */
+        if (cbctx->peer_template.bytes && cbctx->peer_template.size > 0 && !ictx->snode->remote_peer)
+        {
+            ictx->snode->remote_peer = (peer_id_t *)calloc(1, sizeof(peer_id_t));
+            if (ictx->snode->remote_peer)
+            {
+                ictx->snode->remote_peer->bytes = (uint8_t *)malloc(cbctx->peer_template.size);
+                if (ictx->snode->remote_peer->bytes)
+                {
+                    memcpy(ictx->snode->remote_peer->bytes, cbctx->peer_template.bytes, cbctx->peer_template.size);
+                    ictx->snode->remote_peer->size = cbctx->peer_template.size;
+                }
+                else
+                {
+                    free(ictx->snode->remote_peer);
+                    ictx->snode->remote_peer = NULL;
+                }
+            }
+        }
         pthread_cond_broadcast(&ictx->snode->ready_cv);
         pthread_mutex_unlock(&ictx->snode->ready_mtx);
     }
@@ -1123,6 +1142,25 @@ static void *inbound_mplex_session_thread(void *arg)
         ictx->snode->rt = rt;
         ictx->snode->mx = mx;
         ictx->snode->conn = secured;
+        /* Copy peer_id from cb template to session node for stream reuse lookups */
+        if (cb.peer_template.bytes && cb.peer_template.size > 0 && !ictx->snode->remote_peer)
+        {
+            ictx->snode->remote_peer = (peer_id_t *)calloc(1, sizeof(peer_id_t));
+            if (ictx->snode->remote_peer)
+            {
+                ictx->snode->remote_peer->bytes = (uint8_t *)malloc(cb.peer_template.size);
+                if (ictx->snode->remote_peer->bytes)
+                {
+                    memcpy(ictx->snode->remote_peer->bytes, cb.peer_template.bytes, cb.peer_template.size);
+                    ictx->snode->remote_peer->size = cb.peer_template.size;
+                }
+                else
+                {
+                    free(ictx->snode->remote_peer);
+                    ictx->snode->remote_peer = NULL;
+                }
+            }
+        }
         pthread_cond_broadcast(&ictx->snode->ready_cv);
         pthread_mutex_unlock(&ictx->snode->ready_mtx);
     }
