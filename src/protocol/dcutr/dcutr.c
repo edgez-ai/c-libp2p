@@ -50,8 +50,10 @@
 #include "multiformats/unsigned_varint/unsigned_varint.h"
 #include "peer_id/peer_id.h"
 #include "protocol/tcp/protocol_tcp_conn.h"
+#include "protocol/tcp/protocol_tcp_util.h"
 
 #define DCUTR_MAX_MSG_SIZE 4096
+#define DCUTR_HANDSHAKE_TIMEOUT_MS 30000
 #define DCUTR_DEFAULT_HOLE_PUNCH_TIMEOUT_MS 5000
 #define DCUTR_DEFAULT_MAX_RETRY_ATTEMPTS 3
 #define DCUTR_DEFAULT_RETRY_DELAY_MS 500
@@ -697,12 +699,26 @@ static void *dcutr_server_worker(void *arg)
 
     libp2p_stream_set_read_interest(s, true);
 
-    /* Read CONNECT message */
+    /* Read CONNECT message - retry loop for non-blocking reads */
     uint8_t buf[DCUTR_MAX_MSG_SIZE];
-    ssize_t n = libp2p_lp_recv(s, buf, sizeof(buf));
+    ssize_t n;
+    uint64_t deadline = now_mono_ms() + DCUTR_HANDSHAKE_TIMEOUT_MS;
+    for (;;)
+    {
+        n = libp2p_lp_recv(s, buf, sizeof(buf));
+        if (n != LIBP2P_ERR_AGAIN)
+            break;
+        if (now_mono_ms() >= deadline)
+        {
+            fprintf(stderr, "[DCUTR] timeout waiting for CONNECT from peer=%s\n", peer_str);
+            n = LIBP2P_ERR_TIMEOUT;
+            break;
+        }
+        usleep(10000); /* 10ms */
+    }
     if (n <= 0)
     {
-        fprintf(stderr, "[DCUTR] failed to read CONNECT from peer=%s\n", peer_str);
+        fprintf(stderr, "[DCUTR] failed to read CONNECT from peer=%s (n=%zd)\n", peer_str, n);
         libp2p_stream_close(s);
         libp2p__stream_release_async(s);
         if (host)
@@ -785,11 +801,24 @@ static void *dcutr_server_worker(void *arg)
     free(out.buf);
     free_addr_array(our_addrs, num_our_addrs);
 
-    /* Wait for SYNC message */
-    n = libp2p_lp_recv(s, buf, sizeof(buf));
+    /* Wait for SYNC message - retry loop for non-blocking reads */
+    deadline = now_mono_ms() + DCUTR_HANDSHAKE_TIMEOUT_MS;
+    for (;;)
+    {
+        n = libp2p_lp_recv(s, buf, sizeof(buf));
+        if (n != LIBP2P_ERR_AGAIN)
+            break;
+        if (now_mono_ms() >= deadline)
+        {
+            fprintf(stderr, "[DCUTR] timeout waiting for SYNC from peer=%s\n", peer_str);
+            n = LIBP2P_ERR_TIMEOUT;
+            break;
+        }
+        usleep(10000); /* 10ms */
+    }
     if (n <= 0)
     {
-        fprintf(stderr, "[DCUTR] failed to read SYNC from peer=%s\n", peer_str);
+        fprintf(stderr, "[DCUTR] failed to read SYNC from peer=%s (n=%zd)\n", peer_str, n);
         free_addr_array(remote_addrs, num_remote_addrs);
         libp2p_stream_close(s);
         libp2p__stream_release_async(s);
@@ -1324,17 +1353,32 @@ int libp2p_dcutr_upgrade(libp2p_dcutr_service_t *svc, const peer_id_t *peer, int
     }
     free(msg.buf);
 
-    /* Read CONNECT response with peer's addresses */
+    /* Read CONNECT response with peer's addresses - retry loop for non-blocking reads */
     fprintf(stderr, "[DCUTR] CONNECT sent, waiting for response...\n");
     uint8_t buf[DCUTR_MAX_MSG_SIZE];
-    ssize_t n = libp2p_lp_recv(s, buf, sizeof(buf));
+    ssize_t n;
+    uint64_t deadline = now_mono_ms() + DCUTR_HANDSHAKE_TIMEOUT_MS;
+    for (;;)
+    {
+        n = libp2p_lp_recv(s, buf, sizeof(buf));
+        if (n != LIBP2P_ERR_AGAIN)
+            break;
+        if (now_mono_ms() >= deadline)
+        {
+            fprintf(stderr, "[DCUTR] timeout waiting for CONNECT response\n");
+            n = LIBP2P_ERR_TIMEOUT;
+            break;
+        }
+        /* Small sleep to avoid busy-waiting */
+        usleep(10000); /* 10ms */
+    }
     fprintf(stderr, "[DCUTR] lp_recv returned n=%zd (errno=%d)\n", n, errno);
     if (n <= 0)
     {
         fprintf(stderr, "[DCUTR] failed to read CONNECT response\n");
         libp2p_stream_close(s);
         libp2p_stream_free(s);
-        return LIBP2P_ERR_INTERNAL;
+        return n < 0 ? (int)n : LIBP2P_ERR_EOF;
     }
 
     dcutr_message_t resp;
