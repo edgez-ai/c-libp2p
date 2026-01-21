@@ -1902,7 +1902,9 @@ int libp2p_host_open_stream(libp2p_host_t *host, const peer_id_t *peer, const ch
         peer_id_to_string(peer, PEER_ID_FMT_BASE58_LEGACY, peer_str, sizeof(peer_str));
         fprintf(stderr, "[HOST OPEN_STREAM] looking for existing session with peer=%s\n", peer_str);
         
-        libp2p_muxer_t *mx = NULL;
+        libp2p_yamux_ctx_t *found_yctx = NULL;
+        libp2p_muxer_t *found_mx = NULL;
+        int found_is_quic = 0;
         peer_id_t *peer_copy = NULL;
         int session_count = 0;
         pthread_mutex_lock(&host->mtx);
@@ -1912,31 +1914,104 @@ int libp2p_host_open_stream(libp2p_host_t *host, const peer_id_t *peer, const ch
             char sess_peer_str[128] = {0};
             if (sess->remote_peer)
                 peer_id_to_string(sess->remote_peer, PEER_ID_FMT_BASE58_LEGACY, sess_peer_str, sizeof(sess_peer_str));
-            fprintf(stderr, "[HOST OPEN_STREAM]   session[%d]: peer=%s mx=%p has_open_stream=%d\n",
+            fprintf(stderr, "[HOST OPEN_STREAM]   session[%d]: peer=%s yctx=%p mx=%p is_quic=%d\n",
                     session_count, sess_peer_str[0] ? sess_peer_str : "(null)",
-                    (void*)sess->mx, (sess->mx && sess->mx->vt && sess->mx->vt->open_stream) ? 1 : 0);
+                    (void*)sess->yctx, (void*)sess->mx, sess->is_quic);
             
-            if (!sess->mx || !sess->mx->vt || !sess->mx->vt->open_stream)
-                continue;
             if (!sess->remote_peer || !sess->remote_peer->bytes || !peer->bytes)
                 continue;
             if (sess->remote_peer->size != peer->size)
                 continue;
             if (memcmp(sess->remote_peer->bytes, peer->bytes, peer->size) != 0)
                 continue;
-            /* Found a matching session */
-            mx = sess->mx;
-            peer_copy = peer_id_dup(sess->remote_peer);
-            break;
+            /* Found a matching session - check if we can open streams on it */
+            if (sess->yctx)
+            {
+                /* Yamux session - use yamux API directly */
+                found_yctx = sess->yctx;
+                /* Take a reference to the yamux context */
+                atomic_fetch_add_explicit(&found_yctx->refcnt, 1, memory_order_acq_rel);
+                peer_copy = peer_id_dup(sess->remote_peer);
+                break;
+            }
+            else if (sess->is_quic && sess->mx && sess->mx->vt && sess->mx->vt->open_stream)
+            {
+                /* QUIC session - use muxer vtable */
+                found_mx = sess->mx;
+                found_is_quic = 1;
+                peer_copy = peer_id_dup(sess->remote_peer);
+                break;
+            }
         }
-        fprintf(stderr, "[HOST OPEN_STREAM] checked %d sessions, found mx=%p\n", session_count, (void*)mx);
+        fprintf(stderr, "[HOST OPEN_STREAM] checked %d sessions, found yctx=%p mx=%p\n", 
+                session_count, (void*)found_yctx, (void*)found_mx);
         pthread_mutex_unlock(&host->mtx);
         
-        if (mx)
+        /* Try yamux path */
+        if (found_yctx)
         {
-            fprintf(stderr, "[HOST OPEN_STREAM] found existing session, opening stream\n");
-            libp2p_muxer_err_t mxerr = mx->vt->open_stream(mx, NULL, 0, &s);
-            fprintf(stderr, "[HOST OPEN_STREAM] open_stream returned %d, s=%p\n", (int)mxerr, (void*)s);
+            fprintf(stderr, "[HOST OPEN_STREAM] found yamux session, opening stream\n");
+            uint32_t sid = 0;
+            libp2p_yamux_err_t yerr = libp2p_yamux_stream_open(found_yctx, &sid);
+            fprintf(stderr, "[HOST OPEN_STREAM] yamux_stream_open returned %d, sid=%u\n", (int)yerr, sid);
+            if (yerr == LIBP2P_YAMUX_OK)
+            {
+                /* Run multiselect to negotiate protocol */
+                libp2p_io_t *io = libp2p_io_from_yamux(found_yctx, sid);
+                if (io)
+                {
+                    const char *proposals[] = {protocol_id, NULL};
+                    const char *accepted = NULL;
+                    libp2p_multiselect_err_t ms = libp2p_multiselect_dial_io(
+                        io, proposals, host->opts.multiselect_handshake_timeout_ms, &accepted);
+                    fprintf(stderr, "[HOST OPEN_STREAM] multiselect returned %d, accepted=%s\n", 
+                            (int)ms, accepted ? accepted : "(null)");
+                    
+                    if (ms == LIBP2P_MULTISELECT_OK && accepted)
+                    {
+                        /* Create stream wrapper */
+                        s = libp2p_stream_from_yamux(host, found_yctx, sid, accepted, 1, peer_copy);
+                        free((void*)accepted);
+                        libp2p_io_free(io);
+                        
+                        if (s)
+                        {
+                            fprintf(stderr, "[HOST OPEN_STREAM] SUCCESS reused yamux session for peer=%s\n", peer_str);
+                            /* Release our yctx reference (stream holds its own) */
+                            libp2p_yamux_ctx_free(found_yctx);
+                            if (on_open)
+                                schedule_dial_on_open(host, on_open, s, user_data, 0);
+                            return 0;
+                        }
+                        peer_copy = NULL; /* stream took ownership */
+                    }
+                    else
+                    {
+                        free((void*)accepted);
+                        libp2p_io_free(io);
+                        (void)libp2p_yamux_stream_close(found_yctx, sid);
+                    }
+                }
+                else
+                {
+                    (void)libp2p_yamux_stream_close(found_yctx, sid);
+                }
+            }
+            libp2p_yamux_ctx_free(found_yctx);
+            if (peer_copy)
+            {
+                peer_id_destroy(peer_copy);
+                free(peer_copy);
+            }
+            peer_copy = NULL;
+        }
+        
+        /* Try QUIC path */
+        if (found_mx && found_is_quic)
+        {
+            fprintf(stderr, "[HOST OPEN_STREAM] found QUIC session, opening stream\n");
+            libp2p_muxer_err_t mxerr = found_mx->vt->open_stream(found_mx, NULL, 0, &s);
+            fprintf(stderr, "[HOST OPEN_STREAM] quic open_stream returned %d, s=%p\n", (int)mxerr, (void*)s);
             if (mxerr == LIBP2P_MUXER_OK && s)
             {
                 /* Run multiselect to negotiate protocol */
@@ -1963,7 +2038,7 @@ int libp2p_host_open_stream(libp2p_host_t *host, const peer_id_t *peer, const ch
                             }
                             peer_copy = NULL;
                         }
-                        fprintf(stderr, "[HOST OPEN_STREAM] SUCCESS reused existing session for peer=%s\n", peer_str);
+                        fprintf(stderr, "[HOST OPEN_STREAM] SUCCESS reused QUIC session for peer=%s\n", peer_str);
                         if (on_open)
                             schedule_dial_on_open(host, on_open, s, user_data, 0);
                         return 0;
