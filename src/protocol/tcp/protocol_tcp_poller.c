@@ -32,6 +32,7 @@
 #include "protocol/tcp/protocol_tcp_poller.h"
 #include "protocol/tcp/protocol_tcp_queue.h"
 #include "protocol/tcp/protocol_tcp_util.h"
+#include "libp2p/log.h"
 
 /* transient resource‑exhaustion errors we back‑off on */
 #define TRANSIENT_ERR(e) ((e) == EMFILE || (e) == ENFILE || (e) == ENOBUFS)
