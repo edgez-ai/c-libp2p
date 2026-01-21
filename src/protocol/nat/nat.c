@@ -21,6 +21,7 @@
 #include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <ifaddrs.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -267,6 +268,33 @@ static int get_iface_ipv4(const char *ifname, char *out_ip, size_t out_len)
     return res ? 0 : -1;
 }
 
+static void log_interfaces_ipv4(void)
+{
+    struct ifaddrs *ifaddr = NULL;
+    if (getifaddrs(&ifaddr) != 0)
+    {
+        LP_LOGW("NAT", "getifaddrs failed: %s", strerror(errno));
+        return;
+    }
+
+    for (struct ifaddrs *ifa = ifaddr; ifa; ifa = ifa->ifa_next)
+    {
+        if (!ifa->ifa_name || !ifa->ifa_addr)
+            continue;
+        if (ifa->ifa_addr->sa_family != AF_INET)
+            continue;
+
+        char ip[INET_ADDRSTRLEN] = {0};
+        struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
+        if (inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip)))
+        {
+            LP_LOGI("NAT", "iface %s IPv4 %s flags=0x%x", ifa->ifa_name, ip, (unsigned int)ifa->ifa_flags);
+        }
+    }
+
+    freeifaddrs(ifaddr);
+}
+
 /* ======================= UPnP Implementation ======================= */
 
 static int upnp_discover_gateway(libp2p_nat_service_t *svc, int timeout_ms)
@@ -284,6 +312,9 @@ static int upnp_discover_gateway(libp2p_nat_service_t *svc, int timeout_ms)
     /* Enable broadcast */
     int bcast = 1;
     setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &bcast, sizeof(bcast));
+
+    /* Log available interfaces for troubleshooting */
+    log_interfaces_ipv4();
 
     /* Use hard-coded interface preference for SSDP source IP */
     const char *iface_ip = NULL;
