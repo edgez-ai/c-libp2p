@@ -1878,6 +1878,16 @@ int libp2p_host_start(libp2p_host_t *host)
                 /* Add NAT port mapping if NAT service is enabled */
                 if (host->nat_service)
                 {
+                    /* Optional: request a specific WAN port via env var */
+                    const char *ext_port_env = getenv("LIBP2P_NAT_EXTERNAL_PORT");
+                    uint16_t requested_ext_port = 0;
+                    if (ext_port_env && ext_port_env[0] != '\0')
+                    {
+                        long v = strtol(ext_port_env, NULL, 10);
+                        if (v > 0 && v <= 65535)
+                            requested_ext_port = (uint16_t)v;
+                    }
+
                     /* Extract port from the bound address string */
                     uint16_t port = 0;
                     const char *tcp_pos = strstr(s2, "/tcp/");
@@ -1888,8 +1898,9 @@ int libp2p_host_start(libp2p_host_t *host)
                         {
                             /* Map TCP port via UPnP/NAT-PMP */
                             libp2p_nat_mapping_t *mapping = NULL;
+                            uint16_t ext_port = requested_ext_port ? requested_ext_port : port;
                             int map_rc = libp2p_nat_add_mapping(host->nat_service, 
-                                                                 port, port, 1, &mapping);
+                                                                 port, ext_port, 1, &mapping);
                             if (map_rc == 0 && mapping)
                             {
                                 LP_LOGI("NAT_PORT_MAP", "mapped TCP port %u -> external %u", 
@@ -1905,8 +1916,9 @@ int libp2p_host_start(libp2p_host_t *host)
                         {
                             /* Map UDP port via UPnP/NAT-PMP */
                             libp2p_nat_mapping_t *mapping = NULL;
+                            uint16_t ext_port = requested_ext_port ? requested_ext_port : port;
                             int map_rc = libp2p_nat_add_mapping(host->nat_service, 
-                                                                 port, port, 0, &mapping);
+                                                                 port, ext_port, 0, &mapping);
                             if (map_rc == 0 && mapping)
                             {
                                 LP_LOGI("NAT_PORT_MAP", "mapped UDP port %u -> external %u", 
