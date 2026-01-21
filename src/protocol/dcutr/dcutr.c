@@ -1325,8 +1325,10 @@ int libp2p_dcutr_upgrade(libp2p_dcutr_service_t *svc, const peer_id_t *peer, int
     free(msg.buf);
 
     /* Read CONNECT response with peer's addresses */
+    fprintf(stderr, "[DCUTR] CONNECT sent, waiting for response...\n");
     uint8_t buf[DCUTR_MAX_MSG_SIZE];
     ssize_t n = libp2p_lp_recv(s, buf, sizeof(buf));
+    fprintf(stderr, "[DCUTR] lp_recv returned n=%zd (errno=%d)\n", n, errno);
     if (n <= 0)
     {
         fprintf(stderr, "[DCUTR] failed to read CONNECT response\n");
