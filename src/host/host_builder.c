@@ -368,7 +368,7 @@ cleanup_arrays:
         libp2p_nat_opts_default(&nat_opts);
         
         libp2p_nat_service_t *nat = NULL;
-        int nat_rc = libp2p_nat_new(&nat_opts, &nat);
+        int nat_rc = libp2p_nat_new(h, &nat_opts, &nat);
         if (nat_rc == 0 && nat)
         {
             /* Start NAT discovery */
