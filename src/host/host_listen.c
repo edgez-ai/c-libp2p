@@ -1878,19 +1878,9 @@ int libp2p_host_start(libp2p_host_t *host)
                 /* Add NAT port mapping if NAT service is enabled */
                 if (host->nat_service)
                 {
-                    /* Optional: request a specific WAN port via env var */
-                    const char *ext_port_env = getenv("LIBP2P_NAT_EXTERNAL_PORT");
-                    uint16_t requested_ext_port = 0;
-                    if (ext_port_env && ext_port_env[0] != '\0')
-                    {
-                        long v = strtol(ext_port_env, NULL, 10);
-                        if (v > 0 && v <= 65535)
-                            requested_ext_port = (uint16_t)v;
-                    }
-                    if (requested_ext_port)
-                    {
-                        LP_LOGI("NAT_PORT_MAP", "requesting external port %u via UPnP/NAT-PMP", requested_ext_port);
-                    }
+                    /* Hard-coded external port for UPnP/NAT-PMP */
+                    uint16_t requested_ext_port = 13485;
+                    LP_LOGI("NAT_PORT_MAP", "requesting external port %u via UPnP/NAT-PMP", requested_ext_port);
 
                     /* Extract port from the bound address string */
                     uint16_t port = 0;

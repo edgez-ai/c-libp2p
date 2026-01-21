@@ -202,6 +202,71 @@ static char *extract_xml_value(const char *xml, const char *tag)
     return result;
 }
 
+static int get_default_route_iface(char *out_ifname, size_t out_len)
+{
+    if (!out_ifname || out_len == 0)
+        return -1;
+
+    FILE *fp = fopen("/proc/net/route", "r");
+    if (!fp)
+        return -1;
+
+    char line[256];
+    /* Skip header */
+    if (!fgets(line, sizeof(line), fp))
+    {
+        fclose(fp);
+        return -1;
+    }
+
+    while (fgets(line, sizeof(line), fp))
+    {
+        char iface[IFNAMSIZ] = {0};
+        unsigned long dest = 0;
+        unsigned long gw = 0;
+        unsigned int flags = 0;
+
+        /* Format: Iface Destination Gateway Flags ... */
+        if (sscanf(line, "%15s %lx %lx %X", iface, &dest, &gw, &flags) == 4)
+        {
+            if (dest == 0 && (flags & 0x1)) /* RTF_UP */
+            {
+                snprintf(out_ifname, out_len, "%s", iface);
+                fclose(fp);
+                return 0;
+            }
+        }
+    }
+
+    fclose(fp);
+    return -1;
+}
+
+static int get_iface_ipv4(const char *ifname, char *out_ip, size_t out_len)
+{
+    if (!ifname || !out_ip || out_len == 0)
+        return -1;
+
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0)
+        return -1;
+
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+
+    if (ioctl(s, SIOCGIFADDR, &ifr) != 0)
+    {
+        close(s);
+        return -1;
+    }
+
+    struct sockaddr_in *sa = (struct sockaddr_in *)&ifr.ifr_addr;
+    const char *res = inet_ntop(AF_INET, &sa->sin_addr, out_ip, out_len);
+    close(s);
+    return res ? 0 : -1;
+}
+
 /* ======================= UPnP Implementation ======================= */
 
 static int upnp_discover_gateway(libp2p_nat_service_t *svc, int timeout_ms)
@@ -219,6 +284,55 @@ static int upnp_discover_gateway(libp2p_nat_service_t *svc, int timeout_ms)
     /* Enable broadcast */
     int bcast = 1;
     setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &bcast, sizeof(bcast));
+
+    /* Use hard-coded interface preference for SSDP source IP */
+    const char *iface_ip = NULL;
+    char iface_ip_buf[INET_ADDRSTRLEN] = {0};
+
+    const char *preferred_ifaces[] = {
+        "eth0.1",
+        "phy0-sta0"
+    };
+    for (size_t i = 0; i < sizeof(preferred_ifaces) / sizeof(preferred_ifaces[0]); i++)
+    {
+        if (get_iface_ipv4(preferred_ifaces[i], iface_ip_buf, sizeof(iface_ip_buf)) == 0)
+        {
+            iface_ip = iface_ip_buf;
+            LP_LOGI("NAT", "SSDP using interface %s (%s)", preferred_ifaces[i], iface_ip);
+            break;
+        }
+    }
+
+    if (iface_ip && iface_ip[0] != '\0')
+    {
+        struct in_addr iface_addr;
+        if (inet_pton(AF_INET, iface_ip, &iface_addr) == 1)
+        {
+            /* Bind source IP for outbound SSDP */
+            struct sockaddr_in src;
+            memset(&src, 0, sizeof(src));
+            src.sin_family = AF_INET;
+            src.sin_port = 0;
+            src.sin_addr = iface_addr;
+            if (bind(sock, (struct sockaddr *)&src, sizeof(src)) != 0)
+            {
+                LP_LOGW("NAT", "SSDP bind to %s failed: %s", iface_ip, strerror(errno));
+            }
+            /* Ensure multicast uses the selected interface */
+            if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF, &iface_addr, sizeof(iface_addr)) != 0)
+            {
+                LP_LOGW("NAT", "SSDP IP_MULTICAST_IF %s failed: %s", iface_ip, strerror(errno));
+            }
+            else
+            {
+                LP_LOGI("NAT", "SSDP using interface IP %s", iface_ip);
+            }
+        }
+        else
+        {
+            LP_LOGW("NAT", "SSDP interface IP invalid: %s", iface_ip);
+        }
+    }
     
     struct sockaddr_in dest;
     memset(&dest, 0, sizeof(dest));
