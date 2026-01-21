@@ -359,11 +359,13 @@ static int upnp_discover_gateway(libp2p_nat_service_t *svc, int timeout_ms)
             else
             {
                 LP_LOGI("NAT", "SSDP using interface IP %s", iface_ip);
+                fprintf(stderr, "[NAT] SSDP using interface IP %s\n", iface_ip);
             }
         }
         else
         {
             LP_LOGW("NAT", "SSDP interface IP invalid: %s", iface_ip);
+            fprintf(stderr, "[NAT] SSDP interface IP invalid: %s\n", iface_ip);
         }
     }
     
@@ -374,17 +376,21 @@ static int upnp_discover_gateway(libp2p_nat_service_t *svc, int timeout_ms)
     inet_pton(AF_INET, SSDP_MULTICAST_ADDR, &dest.sin_addr);
     
     /* Send SSDP search for WANIPConnection service */
+    fprintf(stderr, "[NAT] SSDP sending WANIP M-SEARCH to %s:%d\n", SSDP_MULTICAST_ADDR, SSDP_PORT);
     if (sendto(sock, SSDP_SEARCH_WANIP, strlen(SSDP_SEARCH_WANIP), 0,
                (struct sockaddr *)&dest, sizeof(dest)) < 0)
     {
         LP_LOGW("NAT", "SSDP sendto failed: %s", strerror(errno));
+        fprintf(stderr, "[NAT] SSDP sendto WANIP failed: %s\n", strerror(errno));
     }
     
     /* Also search for IGD device */
+    fprintf(stderr, "[NAT] SSDP sending IGD M-SEARCH to %s:%d\n", SSDP_MULTICAST_ADDR, SSDP_PORT);
     if (sendto(sock, SSDP_SEARCH_IGD, strlen(SSDP_SEARCH_IGD), 0,
                (struct sockaddr *)&dest, sizeof(dest)) < 0)
     {
         LP_LOGW("NAT", "SSDP sendto failed: %s", strerror(errno));
+        fprintf(stderr, "[NAT] SSDP sendto IGD failed: %s\n", strerror(errno));
     }
     
     /* Wait for responses */
@@ -412,6 +418,13 @@ static int upnp_discover_gateway(libp2p_nat_service_t *svc, int timeout_ms)
             continue;
         
         response[n] = '\0';
+
+        {
+            char from_ip[INET_ADDRSTRLEN] = {0};
+            inet_ntop(AF_INET, &from.sin_addr, from_ip, sizeof(from_ip));
+            fprintf(stderr, "[NAT] SSDP response from %s:%u (%zd bytes)\n",
+                    from_ip, ntohs(from.sin_port), n);
+        }
         
         /* Check if this is a valid UPnP response */
         if (strstr(response, "200 OK") == NULL)
