@@ -1888,8 +1888,8 @@ int libp2p_host_start(libp2p_host_t *host)
                         {
                             /* Map TCP port via UPnP/NAT-PMP */
                             libp2p_nat_mapping_t *mapping = NULL;
-                            int map_rc = libp2p_nat_add_mapping(host->nat_service, LIBP2P_NAT_PROTO_TCP, 
-                                                                 port, port, &mapping);
+                            int map_rc = libp2p_nat_add_mapping(host->nat_service, 
+                                                                 port, port, 1, &mapping);
                             if (map_rc == 0 && mapping)
                             {
                                 LP_LOGI("NAT_PORT_MAP", "mapped TCP port %u -> external %u", 
@@ -1905,8 +1905,8 @@ int libp2p_host_start(libp2p_host_t *host)
                         {
                             /* Map UDP port via UPnP/NAT-PMP */
                             libp2p_nat_mapping_t *mapping = NULL;
-                            int map_rc = libp2p_nat_add_mapping(host->nat_service, LIBP2P_NAT_PROTO_UDP, 
-                                                                 port, port, &mapping);
+                            int map_rc = libp2p_nat_add_mapping(host->nat_service, 
+                                                                 port, port, 0, &mapping);
                             if (map_rc == 0 && mapping)
                             {
                                 LP_LOGI("NAT_PORT_MAP", "mapped UDP port %u -> external %u", 
