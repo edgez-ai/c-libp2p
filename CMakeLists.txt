@@ -102,7 +102,7 @@ set(SANITIZERS "address;undefined" CACHE STRING "List of sanitizers to enable (s
 option(LIBP2P_VENDOR_PICOQUIC "Build and expose picoquic vendor target" ON)
 
 if(NOT LIBP2P_VENDOR_PICOQUIC)
-    message(FATAL_ERROR "Bundled picoquic is required; configure with -DLIBP2P_VENDOR_PICOQUIC=ON.")
+    message(STATUS "QUIC transport disabled (LIBP2P_VENDOR_PICOQUIC=OFF)")
 endif()
 
 if(LIBP2P_VENDOR_PICOQUIC AND NOT EXISTS "${PROJECT_SOURCE_DIR}/external/picoquic/CMakeLists.txt")
