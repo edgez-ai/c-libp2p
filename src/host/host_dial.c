@@ -73,6 +73,37 @@ static peer_id_t *peer_id_dup(const peer_id_t *src)
     return dup;
 }
 
+static char *host_dial_addr_with_peer_suffix(const char *maddr, const peer_id_t *peer)
+{
+    if (!maddr)
+        return NULL;
+
+    size_t base_len = strlen(maddr);
+    char *out = (char *)malloc(base_len + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, maddr, base_len + 1);
+
+    if (strstr(out, "/p2p/") || strstr(out, "/ipfs/"))
+        return out;
+
+    if (!peer || !peer->bytes || peer->size == 0)
+        return out;
+
+    char peer_str[128] = {0};
+    if (peer_id_to_string(peer, PEER_ID_FMT_BASE58_LEGACY, peer_str, sizeof(peer_str)) < 0 || !peer_str[0])
+        return out;
+
+    size_t new_len = base_len + 5 + strlen(peer_str) + 1;
+    char *with_peer = (char *)malloc(new_len);
+    if (!with_peer)
+        return out;
+
+    snprintf(with_peer, new_len, "%s/p2p/%s", out, peer_str);
+    free(out);
+    return with_peer;
+}
+
 static uint64_t host_dial_quic_trace_begin(const char *remote)
 {
     uint64_t id = __atomic_fetch_add(&g_quic_handshake_seq, 1u, __ATOMIC_RELAXED) + 1u;
@@ -2075,43 +2106,37 @@ int libp2p_host_open_stream(libp2p_host_t *host, const peer_id_t *peer, const ch
         return LIBP2P_ERR_INTERNAL;
     }
     
+    const int reconnect_attempts = 3;
     for (size_t i = 0; i < n; i++)
     {
         int serr = 0;
-        char *maddr = multiaddr_to_str(addrs[i], &serr);
-        if (!maddr)
+        char *addr_str = multiaddr_to_str(addrs[i], &serr);
+        if (!addr_str)
             continue;
         
-        fprintf(stderr, "[HOST OPEN_STREAM] original addr: %s\n", maddr);
-        
-        /* Append /p2p/<peer-id> suffix if not present, to enable session reuse */
-        char *maddr_with_peer = maddr;
-        if (!strstr(maddr, "/p2p/") && !strstr(maddr, "/ipfs/"))
+        fprintf(stderr, "[HOST OPEN_STREAM] original addr: %s\n", addr_str);
+        char *maddr = host_dial_addr_with_peer_suffix(addr_str, peer);
+        free(addr_str);
+        if (!maddr)
+            continue;
+
+        if (strstr(maddr, "/p2p/") || strstr(maddr, "/ipfs/"))
+            fprintf(stderr, "[HOST OPEN_STREAM] dial addr: %s\n", maddr);
+
+        for (int attempt = 1; attempt <= reconnect_attempts; attempt++)
         {
-            char peer_str[128] = {0};
-            if (peer_id_to_string(peer, PEER_ID_FMT_BASE58_LEGACY, peer_str, sizeof(peer_str)) == PEER_ID_SUCCESS && peer_str[0])
-            {
-                size_t new_len = strlen(maddr) + 5 + strlen(peer_str) + 1;
-                maddr_with_peer = (char *)malloc(new_len);
-                if (maddr_with_peer)
-                {
-                    snprintf(maddr_with_peer, new_len, "%s/p2p/%s", maddr, peer_str);
-                    fprintf(stderr, "[HOST OPEN_STREAM] with peer suffix: %s\n", maddr_with_peer);
-                    free(maddr);
-                    maddr = maddr_with_peer;
-                }
-                else
-                {
-                    maddr_with_peer = maddr;
-                }
-            }
-            else
-            {
-                fprintf(stderr, "[HOST OPEN_STREAM] failed to get peer string\n");
-            }
+            s = NULL;
+            rc = libp2p_host_dial_selected_blocking(host, maddr, &sel, host->opts.dial_timeout_ms, &s);
+            if (rc == 0 && s)
+                break;
+
+            if (rc != LIBP2P_ERR_PROTO_NEGOTIATION_FAILED && rc != LIBP2P_ERR_RESET && rc != LIBP2P_ERR_CLOSED)
+                break;
+
+            fprintf(stderr, "[HOST OPEN_STREAM] transient dial failure rc=%d attempt=%d/%d addr=%s\n",
+                    rc, attempt, reconnect_attempts, maddr);
         }
-        
-        rc = libp2p_host_dial_selected_blocking(host, maddr, &sel, host->opts.dial_timeout_ms, &s);
+
         free(maddr);
         if (rc == 0 && s)
             break;
@@ -2372,15 +2397,34 @@ try_dial:
         .base_path = NULL,
         .semver_range = NULL,
     };
+    const int reconnect_attempts = 3;
     for (size_t i = 0; i < n; i++)
     {
         int serr = 0;
-        char *maddr = multiaddr_to_str(addrs[i], &serr);
+        char *addr_str = multiaddr_to_str(addrs[i], &serr);
+        if (!addr_str)
+            continue;
+
+        char *maddr = host_dial_addr_with_peer_suffix(addr_str, &ctx->peer);
+        free(addr_str);
         if (!maddr)
             continue;
+
         LP_LOGD("STREAM_ASYNC", "[open_async] dialing %s", maddr);
-        s = NULL;
-        rc = libp2p_host_dial_selected_blocking(host, maddr, &sel, host->opts.dial_timeout_ms, &s);
+        for (int attempt = 1; attempt <= reconnect_attempts; attempt++)
+        {
+            s = NULL;
+            rc = libp2p_host_dial_selected_blocking(host, maddr, &sel, host->opts.dial_timeout_ms, &s);
+            if (rc == 0 && s)
+                break;
+
+            if (rc != LIBP2P_ERR_PROTO_NEGOTIATION_FAILED && rc != LIBP2P_ERR_RESET && rc != LIBP2P_ERR_CLOSED)
+                break;
+
+            LP_LOGW("STREAM_ASYNC", "[open_async] transient dial failure rc=%d attempt=%d/%d addr=%s",
+                    rc, attempt, reconnect_attempts, maddr);
+        }
+
         free(maddr);
         if (rc == 0 && s)
             break;
