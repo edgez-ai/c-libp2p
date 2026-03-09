@@ -49,6 +49,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include <time.h>
 #include <errno.h>
@@ -69,6 +70,27 @@
 #include "multiformats/multiaddr/multiaddr.h"
 #include "multiformats/unsigned_varint/unsigned_varint.h"
 #include "peer_id/peer_id.h"
+
+#ifndef EDGEZ_DEBUG_LOG
+#define EDGEZ_DEBUG_LOG 0
+#endif
+
+static int edgez_autonat_fprintf(FILE *stream, const char *fmt, ...)
+{
+    va_list args;
+
+    if (!EDGEZ_DEBUG_LOG && stream == stderr && fmt != NULL && strncmp(fmt, "[AUTONAT-V2]", 12) == 0)
+    {
+        return 0;
+    }
+
+    va_start(args, fmt);
+    int rc = vfprintf(stream, fmt, args);
+    va_end(args);
+    return rc;
+}
+
+#define fprintf edgez_autonat_fprintf
 
 /* Protocol IDs */
 #define AUTONAT_V2_DIAL_REQUEST_PROTO "/libp2p/autonat/2/dial-request"

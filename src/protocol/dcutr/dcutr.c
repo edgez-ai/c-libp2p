@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include <time.h>
 #include <errno.h>
@@ -51,6 +52,27 @@
 #include "peer_id/peer_id.h"
 #include "protocol/tcp/protocol_tcp_conn.h"
 #include "protocol/tcp/protocol_tcp_util.h"
+
+#ifndef EDGEZ_DEBUG_LOG
+#define EDGEZ_DEBUG_LOG 0
+#endif
+
+static int edgez_dcutr_fprintf(FILE *stream, const char *fmt, ...)
+{
+    va_list args;
+
+    if (!EDGEZ_DEBUG_LOG && stream == stderr && fmt != NULL && strncmp(fmt, "[DCUTR]", 7) == 0)
+    {
+        return 0;
+    }
+
+    va_start(args, fmt);
+    int rc = vfprintf(stream, fmt, args);
+    va_end(args);
+    return rc;
+}
+
+#define fprintf edgez_dcutr_fprintf
 
 #define DCUTR_MAX_MSG_SIZE 4096
 #define DCUTR_HANDSHAKE_TIMEOUT_MS 30000

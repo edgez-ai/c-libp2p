@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <stdarg.h>
 
 #include "host_internal.h"
 #include "proto_select_internal.h"
@@ -34,6 +35,28 @@
 #include "protocol/identify/protocol_identify.h"
 #include "protocol/tcp/protocol_tcp_util.h" /* now_mono_ms */
 #include "multiformats/multicodec/multicodec_codes.h"
+
+#ifndef EDGEZ_DEBUG_LOG
+#define EDGEZ_DEBUG_LOG 0
+#endif
+
+static int edgez_host_dial_fprintf(FILE *stream, const char *fmt, ...)
+{
+    va_list args;
+
+    if (!EDGEZ_DEBUG_LOG && stream == stderr && fmt != NULL &&
+        (strncmp(fmt, "[DIAL REUSE]", 12) == 0 || strncmp(fmt, "[HOST OPEN_STREAM]", 18) == 0))
+    {
+        return 0;
+    }
+
+    va_start(args, fmt);
+    int rc = vfprintf(stream, fmt, args);
+    va_end(args);
+    return rc;
+}
+
+#define fprintf edgez_host_dial_fprintf
 
 static uint64_t g_quic_handshake_seq = 0;
 static uint32_t g_quic_handshake_pending = 0;
