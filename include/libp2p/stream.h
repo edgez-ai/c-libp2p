@@ -44,6 +44,10 @@ const multiaddr_t *libp2p_stream_local_addr(const libp2p_stream_t *s);
 const multiaddr_t *libp2p_stream_remote_addr(const libp2p_stream_t *s);
 const char *libp2p_stream_remote_addr_str(const libp2p_stream_t *s);
 
+/* Snapshot stream lifecycle counters for leak/retention diagnostics. Any
+ * output pointer may be NULL. Counters are process-global. */
+void libp2p_stream_get_counters(long *created, long *destroyed, long *live);
+
 #ifdef __cplusplus
 }
 #endif

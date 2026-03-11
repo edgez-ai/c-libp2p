@@ -102,6 +102,17 @@ static void stream_counter_on_destroy(void)
         fprintf(stderr, "[LANTERN STREAM] destroy destroyed=%ld live=%ld\n", destroyed, live);
 }
 
+void libp2p_stream_get_counters(long *created, long *destroyed, long *live)
+{
+    stream_counters_init_once();
+    if (created)
+        *created = atomic_load_explicit(&g_stream_created_count, memory_order_acquire);
+    if (destroyed)
+        *destroyed = atomic_load_explicit(&g_stream_destroyed_count, memory_order_acquire);
+    if (live)
+        *live = atomic_load_explicit(&g_stream_live_count, memory_order_acquire);
+}
+
 static stream_stub_t *S(libp2p_stream_t *s) { return (stream_stub_t *)s; }
 static const stream_stub_t *SC(const libp2p_stream_t *s) { return (const stream_stub_t *)s; }
 
