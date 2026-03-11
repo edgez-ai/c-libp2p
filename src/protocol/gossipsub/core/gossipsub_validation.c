@@ -300,7 +300,10 @@ static void gossipsub_validation_schedule_finish(gossipsub_validation_ctx_t *ctx
     {
         libp2p_host_t *host = (ctx->gs) ? ctx->gs->host : NULL;
         if (host)
-            libp2p__exec_on_cb_thread(host, gossipsub_validation_finish_exec, ctx);
+        {
+            if (!libp2p__exec_on_cb_thread(host, gossipsub_validation_finish_exec, ctx))
+                gossipsub_validation_ctx_release(ctx);
+        }
         else
             gossipsub_validation_ctx_release(ctx);
     }
@@ -851,7 +854,10 @@ libp2p_err_t gossipsub_validation_schedule(libp2p_gossipsub_t *gs,
             topic_label,
             msg->data_len);
     if (gs->host)
-        libp2p__exec_on_cb_thread(gs->host, gossipsub_validation_begin_exec, ctx);
+    {
+        if (!libp2p__exec_on_cb_thread(gs->host, gossipsub_validation_begin_exec, ctx))
+            gossipsub_validation_ctx_release(ctx);
+    }
     else
         gossipsub_validation_ctx_release(ctx);
     return LIBP2P_ERR_OK;

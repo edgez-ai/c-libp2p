@@ -861,7 +861,11 @@ static int quic_run_inbound_handshake(quic_muxer_ctx_t *mx, quic_stream_ctx_t *s
                 }
                 else
                 {
-                    libp2p__exec_on_cb_thread(host, quic_proto_open_exec, task);
+                    if (!libp2p__exec_on_cb_thread(host, quic_proto_open_exec, task))
+                    {
+                        libp2p__stream_release_async(stream);
+                        free(task);
+                    }
                 }
             }
         }
@@ -2020,7 +2024,11 @@ static void quic_stream_schedule_readable(quic_stream_ctx_t *ctx, quic_muxer_ctx
         free(task);
         return;
     }
-    libp2p__exec_on_cb_thread(host, quic_stream_fire_readable, task);
+    if (!libp2p__exec_on_cb_thread(host, quic_stream_fire_readable, task))
+    {
+        libp2p__stream_release_async(stream);
+        free(task);
+    }
 }
 
 static void quic_stream_schedule_writable(quic_stream_ctx_t *ctx)
@@ -2060,7 +2068,11 @@ static void quic_stream_schedule_writable(quic_stream_ctx_t *ctx)
         free(task);
         return;
     }
-    libp2p__exec_on_cb_thread(host, quic_stream_fire_writable, task);
+    if (!libp2p__exec_on_cb_thread(host, quic_stream_fire_writable, task))
+    {
+        libp2p__stream_release_async(stream);
+        free(task);
+    }
 }
 
 static void quic_stream_handshake_exec(void *arg)
@@ -2245,7 +2257,19 @@ static void quic_stream_start_handshake(quic_muxer_ctx_t *mx, quic_stream_ctx_t 
         return;
     }
     pthread_mutex_unlock(&st->lock);
-    libp2p__exec_on_cb_thread(host, quic_stream_handshake_exec, task);
+    if (!libp2p__exec_on_cb_thread(host, quic_stream_handshake_exec, task))
+    {
+        if (task->stream)
+            libp2p__stream_release_async(task->stream);
+        quic_muxer_ctx_release(mx);
+        quic_stream_ctx_release(st);
+        free(task);
+        pthread_mutex_lock(&st->lock);
+        st->handshake_running = 0;
+        if (!st->handshake_done)
+            st->handshake_done = 1;
+        pthread_mutex_unlock(&st->lock);
+    }
 }
 
 static void quic_stream_push_bytes(quic_stream_ctx_t *ctx, const uint8_t *data, size_t len)

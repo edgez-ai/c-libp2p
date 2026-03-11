@@ -1047,7 +1047,11 @@ static void mplex_stream_event_cb(libp2p_mplex_stream_t *stream, libp2p_mplex_ev
                 {
                     t->s = stream_pub;
                     t->def = chosen; /* shallow copy of callbacks + user_data */
-                    libp2p__exec_on_cb_thread(c->host, cbexec_proto_on_open, t);
+                    if (!libp2p__exec_on_cb_thread(c->host, cbexec_proto_on_open, t))
+                    {
+                        libp2p__stream_release_async(stream_pub);
+                        free(t);
+                    }
                 }
                 else
                 {
@@ -1783,7 +1787,11 @@ static void *inbound_substream_worker(void *arg)
             {
                 t->s = stream;
                 t->def = chosen; /* shallow copy of callbacks + user_data */
-                libp2p__exec_on_cb_thread(c->host, cbexec_proto_on_open, t);
+                if (!libp2p__exec_on_cb_thread(c->host, cbexec_proto_on_open, t))
+                {
+                    libp2p__stream_release_async(stream);
+                    free(t);
+                }
             }
             else
             {

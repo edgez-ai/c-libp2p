@@ -501,7 +501,12 @@ static void schedule_dial_on_open(libp2p_host_t *host, libp2p_on_stream_open_fn 
     t->s = s;
     t->ud = ud;
     t->err = err;
-    libp2p__exec_on_cb_thread(host, cbexec_dial_on_open, t);
+    if (!libp2p__exec_on_cb_thread(host, cbexec_dial_on_open, t))
+    {
+        if (retained)
+            libp2p__stream_release_async(s);
+        free(t);
+    }
 }
 
 static size_t count_outbound_conns(libp2p_host_t *host)

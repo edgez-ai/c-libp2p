@@ -96,19 +96,19 @@ void libp2p__cbexec_stop(libp2p_host_t *host)
     pthread_cond_destroy(&host->cb_cv);
 }
 
-void libp2p__exec_on_cb_thread(libp2p_host_t *host, libp2p_cbexec_fn fn, void *user_data)
+int libp2p__exec_on_cb_thread(libp2p_host_t *host, libp2p_cbexec_fn fn, void *user_data)
 {
     if (!host || !fn)
-        return;
+        return 0;
     /* Check cb_stop atomically BEFORE acquiring the mutex to avoid a use-after-free
      * race. If the callback system is stopping/stopped, the host may be freed soon
      * and we must not touch the mutex. This check works because libp2p__cbexec_stop
      * sets cb_stop atomically BEFORE acquiring/releasing the mutex. */
     if (atomic_load_explicit(&host->cb_stop, memory_order_acquire))
-        return;
+        return 0;
     cb_task_node_t *node = (cb_task_node_t *)calloc(1, sizeof(*node));
     if (!node)
-        return;
+        return 0;
     node->fn = fn;
     node->ud = user_data;
     node->next = NULL;
@@ -116,9 +116,15 @@ void libp2p__exec_on_cb_thread(libp2p_host_t *host, libp2p_cbexec_fn fn, void *u
     if (atomic_load_explicit(&host->cb_stop, memory_order_acquire))
     {
         free(node);
-        return;
+        return 0;
     }
     pthread_mutex_lock(&host->mtx);
+    if (atomic_load_explicit(&host->cb_stop, memory_order_acquire))
+    {
+        pthread_mutex_unlock(&host->mtx);
+        free(node);
+        return 0;
+    }
     if (host->cb_tail)
     {
         host->cb_tail->next = node;
@@ -130,5 +136,6 @@ void libp2p__exec_on_cb_thread(libp2p_host_t *host, libp2p_cbexec_fn fn, void *u
     }
     pthread_cond_broadcast(&host->cb_cv);
     pthread_mutex_unlock(&host->mtx);
+    return 1;
 }
 

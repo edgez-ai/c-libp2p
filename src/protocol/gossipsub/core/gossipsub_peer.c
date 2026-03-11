@@ -950,7 +950,12 @@ static void gossipsub_peer_schedule_flush_locked(libp2p_gossipsub_t *gs, gossips
     entry->flush_scheduled = 1;
     task->gs = gs;
     task->peer = dup;
-    libp2p__exec_on_cb_thread(gs->host, gossipsub_flush_exec, task);
+    if (!libp2p__exec_on_cb_thread(gs->host, gossipsub_flush_exec, task))
+    {
+        entry->flush_scheduled = 0;
+        gossipsub_peer_free(dup);
+        free(task);
+    }
 }
 
 libp2p_err_t gossipsub_peer_enqueue_frame_locked(libp2p_gossipsub_t *gs,

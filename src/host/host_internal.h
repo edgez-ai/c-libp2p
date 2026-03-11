@@ -239,7 +239,7 @@ void libp2p__event_dispatcher_stop(struct libp2p_host *host);
 typedef void (*libp2p_cbexec_fn)(void *user_data);
 int libp2p__cbexec_start(struct libp2p_host *host);
 void libp2p__cbexec_stop(struct libp2p_host *host);
-void libp2p__exec_on_cb_thread(struct libp2p_host *host, libp2p_cbexec_fn fn, void *user_data);
+int libp2p__exec_on_cb_thread(struct libp2p_host *host, libp2p_cbexec_fn fn, void *user_data);
 
 /* Proactively schedule an Identify Push publication once (non-blocking). */
 void libp2p__schedule_identify_push(struct libp2p_host *host);
