@@ -50,6 +50,58 @@ typedef struct stream_stub
     atomic_bool freed;
 } stream_stub_t;
 
+static atomic_long g_stream_live_count;
+static atomic_long g_stream_created_count;
+static atomic_long g_stream_destroyed_count;
+static atomic_int g_stream_counter_inited;
+
+static int stream_leak_debug_enabled(void)
+{
+    static atomic_int cached = 0;
+    int state = atomic_load_explicit(&cached, memory_order_acquire);
+    if (state != 0)
+        return state == 2;
+
+    const char *env = getenv("LANTERN_STREAM_LEAK_DEBUG");
+    int enabled = (env && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+    atomic_store_explicit(&cached, enabled ? 2 : 1, memory_order_release);
+    return enabled;
+}
+
+static void stream_counters_init_once(void)
+{
+    int expected = 0;
+    if (atomic_compare_exchange_strong_explicit(&g_stream_counter_inited, &expected, 1, memory_order_acq_rel, memory_order_acquire))
+    {
+        atomic_init(&g_stream_live_count, 0);
+        atomic_init(&g_stream_created_count, 0);
+        atomic_init(&g_stream_destroyed_count, 0);
+    }
+}
+
+static void stream_counter_on_create(const char *kind)
+{
+    stream_counters_init_once();
+    long created = atomic_fetch_add_explicit(&g_stream_created_count, 1, memory_order_acq_rel) + 1;
+    long live = atomic_fetch_add_explicit(&g_stream_live_count, 1, memory_order_acq_rel) + 1;
+    if (stream_leak_debug_enabled())
+        fprintf(stderr, "[LANTERN STREAM] create kind=%s created=%ld live=%ld\n", kind ? kind : "?", created, live);
+}
+
+static void stream_counter_on_destroy(void)
+{
+    stream_counters_init_once();
+    long destroyed = atomic_fetch_add_explicit(&g_stream_destroyed_count, 1, memory_order_acq_rel) + 1;
+    long live = atomic_fetch_sub_explicit(&g_stream_live_count, 1, memory_order_acq_rel) - 1;
+    if (live < 0)
+    {
+        atomic_store_explicit(&g_stream_live_count, 0, memory_order_release);
+        live = 0;
+    }
+    if (stream_leak_debug_enabled())
+        fprintf(stderr, "[LANTERN STREAM] destroy destroyed=%ld live=%ld\n", destroyed, live);
+}
+
 static stream_stub_t *S(libp2p_stream_t *s) { return (stream_stub_t *)s; }
 static const stream_stub_t *SC(const libp2p_stream_t *s) { return (const stream_stub_t *)s; }
 
@@ -515,6 +567,7 @@ libp2p_stream_t *libp2p_stream_from_conn(struct libp2p_host *host, libp2p_conn_t
             pthread_mutex_unlock(&host->mtx);
         }
     }
+    stream_counter_on_create("conn");
     return (libp2p_stream_t *)ss;
 }
 
@@ -789,6 +842,7 @@ libp2p_stream_t *libp2p_stream_from_ops(struct libp2p_host *host, void *io_ctx, 
             pthread_mutex_unlock(&host->mtx);
         }
     }
+    stream_counter_on_create("ops");
     return (libp2p_stream_t *)ss;
 }
 
@@ -842,6 +896,7 @@ void libp2p__stream_destroy(libp2p_stream_t *s)
         free(st->remote_addr_str);
         st->remote_addr_str = NULL;
     }
+    stream_counter_on_destroy();
     free(st);
 }
 
