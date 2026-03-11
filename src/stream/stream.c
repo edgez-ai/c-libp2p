@@ -51,6 +51,8 @@ typedef struct stream_stub
 } stream_stub_t;
 
 static atomic_long g_stream_live_count;
+static atomic_long g_stream_live_conn_count;
+static atomic_long g_stream_live_ops_count;
 static atomic_long g_stream_created_count;
 static atomic_long g_stream_destroyed_count;
 static atomic_int g_stream_counter_inited;
@@ -74,29 +76,42 @@ static void stream_counters_init_once(void)
     if (atomic_compare_exchange_strong_explicit(&g_stream_counter_inited, &expected, 1, memory_order_acq_rel, memory_order_acquire))
     {
         atomic_init(&g_stream_live_count, 0);
+        atomic_init(&g_stream_live_conn_count, 0);
+        atomic_init(&g_stream_live_ops_count, 0);
         atomic_init(&g_stream_created_count, 0);
         atomic_init(&g_stream_destroyed_count, 0);
     }
 }
 
-static void stream_counter_on_create(const char *kind)
+static void stream_counter_on_create(const char *kind, int is_ops)
 {
     stream_counters_init_once();
     long created = atomic_fetch_add_explicit(&g_stream_created_count, 1, memory_order_acq_rel) + 1;
     long live = atomic_fetch_add_explicit(&g_stream_live_count, 1, memory_order_acq_rel) + 1;
+    if (is_ops)
+        (void)atomic_fetch_add_explicit(&g_stream_live_ops_count, 1, memory_order_acq_rel);
+    else
+        (void)atomic_fetch_add_explicit(&g_stream_live_conn_count, 1, memory_order_acq_rel);
     if (stream_leak_debug_enabled())
         fprintf(stderr, "[LANTERN STREAM] create kind=%s created=%ld live=%ld\n", kind ? kind : "?", created, live);
 }
 
-static void stream_counter_on_destroy(void)
+static void stream_counter_on_destroy(int is_ops)
 {
     stream_counters_init_once();
     long destroyed = atomic_fetch_add_explicit(&g_stream_destroyed_count, 1, memory_order_acq_rel) + 1;
     long live = atomic_fetch_sub_explicit(&g_stream_live_count, 1, memory_order_acq_rel) - 1;
+    atomic_long *kind_live_counter = is_ops ? &g_stream_live_ops_count : &g_stream_live_conn_count;
+    long kind_live = atomic_fetch_sub_explicit(kind_live_counter, 1, memory_order_acq_rel) - 1;
     if (live < 0)
     {
         atomic_store_explicit(&g_stream_live_count, 0, memory_order_release);
         live = 0;
+    }
+    if (kind_live < 0)
+    {
+        atomic_store_explicit(kind_live_counter, 0, memory_order_release);
+        kind_live = 0;
     }
     if (stream_leak_debug_enabled())
         fprintf(stderr, "[LANTERN STREAM] destroy destroyed=%ld live=%ld\n", destroyed, live);
@@ -111,6 +126,15 @@ void libp2p_stream_get_counters(long *created, long *destroyed, long *live)
         *destroyed = atomic_load_explicit(&g_stream_destroyed_count, memory_order_acquire);
     if (live)
         *live = atomic_load_explicit(&g_stream_live_count, memory_order_acquire);
+}
+
+void libp2p_stream_get_kind_counters(long *live_conn, long *live_ops)
+{
+    stream_counters_init_once();
+    if (live_conn)
+        *live_conn = atomic_load_explicit(&g_stream_live_conn_count, memory_order_acquire);
+    if (live_ops)
+        *live_ops = atomic_load_explicit(&g_stream_live_ops_count, memory_order_acquire);
 }
 
 static stream_stub_t *S(libp2p_stream_t *s) { return (stream_stub_t *)s; }
@@ -578,7 +602,7 @@ libp2p_stream_t *libp2p_stream_from_conn(struct libp2p_host *host, libp2p_conn_t
             pthread_mutex_unlock(&host->mtx);
         }
     }
-    stream_counter_on_create("conn");
+    stream_counter_on_create("conn", 0);
     return (libp2p_stream_t *)ss;
 }
 
@@ -853,7 +877,7 @@ libp2p_stream_t *libp2p_stream_from_ops(struct libp2p_host *host, void *io_ctx, 
             pthread_mutex_unlock(&host->mtx);
         }
     }
-    stream_counter_on_create("ops");
+    stream_counter_on_create("ops", 1);
     return (libp2p_stream_t *)ss;
 }
 
@@ -907,7 +931,7 @@ void libp2p__stream_destroy(libp2p_stream_t *s)
         free(st->remote_addr_str);
         st->remote_addr_str = NULL;
     }
-    stream_counter_on_destroy();
+    stream_counter_on_destroy(st->has_ops ? 1 : 0);
     free(st);
 }
 

@@ -48,6 +48,11 @@ const char *libp2p_stream_remote_addr_str(const libp2p_stream_t *s);
  * output pointer may be NULL. Counters are process-global. */
 void libp2p_stream_get_counters(long *created, long *destroyed, long *live);
 
+/* Snapshot stream live counters by backend type. Any output pointer may be NULL.
+ * conn: conn-backed stream stubs
+ * ops: muxer/backend-ops-backed stream stubs */
+void libp2p_stream_get_kind_counters(long *live_conn, long *live_ops);
+
 #ifdef __cplusplus
 }
 #endif
