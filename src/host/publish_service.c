@@ -164,6 +164,14 @@ typedef struct
     size_t plen;
 } __libp2p__idpush_ctx_t;
 
+static void __libp2p__idpush_ctx_free(__libp2p__idpush_ctx_t *ctx)
+{
+    if (!ctx)
+        return;
+    free(ctx->payload);
+    free(ctx);
+}
+
 static void __libp2p__idpush_on_open(libp2p_stream_t *s, void *user_data, int err)
 {
     __libp2p__idpush_ctx_t *ctx = (__libp2p__idpush_ctx_t *)user_data;
@@ -178,12 +186,7 @@ static void __libp2p__idpush_on_open(libp2p_stream_t *s, void *user_data, int er
         libp2p_stream_close(s);
         libp2p_stream_free(s);
     }
-    if (ctx)
-    {
-        if (ctx->payload)
-            free(ctx->payload);
-        free(ctx);
-    }
+    __libp2p__idpush_ctx_free(ctx);
 }
 
 typedef enum
@@ -298,7 +301,12 @@ static void *__libp2p__publisher_async(void *arg)
         ctx->plen = plen;
         LP_LOGD("IDENTIFY_PUB", "[async] open_stream_async by peer id (size=%zu)", peers[i].size);
         LIBP2P_TRACE("idpush", "open_stream_async peer_size=%zu", peers[i].size);
-        (void)libp2p_host_open_stream_async(host, &peers[i], LIBP2P_IDENTIFY_PUSH_PROTO_ID, __libp2p__idpush_on_open, ctx);
+        int open_rc =
+            libp2p_host_open_stream_async(host, &peers[i], LIBP2P_IDENTIFY_PUSH_PROTO_ID, __libp2p__idpush_on_open, ctx);
+        if (open_rc != 0)
+        {
+            __libp2p__idpush_ctx_free(ctx);
+        }
     }
 
     if (addr_len > 0)
@@ -335,7 +343,11 @@ static void *__libp2p__publisher_async(void *arg)
             ctx->plen = plen;
             attempted_by_addr = true;
             LIBP2P_TRACE("idpush", "dial_selected addr=%s", addr);
-            (void)libp2p_host_dial_selected(host, addr, &sel, NULL, __libp2p__idpush_on_open, ctx);
+            int dial_rc = libp2p_host_dial_selected(host, addr, &sel, NULL, __libp2p__idpush_on_open, ctx);
+            if (dial_rc != 0)
+            {
+                __libp2p__idpush_ctx_free(ctx);
+            }
         }
     }
 
