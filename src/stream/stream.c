@@ -886,6 +886,7 @@ void libp2p__stream_destroy(libp2p_stream_t *s)
     stream_stub_t *st = S(s);
     if (!st)
         return;
+    const int was_ops_stream = st->has_ops ? 1 : 0;
     /* idempotent: if already freed, bail */
     bool was_freed = atomic_exchange_explicit(&st->freed, true, memory_order_acq_rel);
     if (was_freed)
@@ -931,7 +932,7 @@ void libp2p__stream_destroy(libp2p_stream_t *s)
         free(st->remote_addr_str);
         st->remote_addr_str = NULL;
     }
-    stream_counter_on_destroy(st->has_ops ? 1 : 0);
+    stream_counter_on_destroy(was_ops_stream);
     free(st);
 }
 
