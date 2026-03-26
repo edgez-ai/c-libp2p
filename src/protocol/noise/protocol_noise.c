@@ -681,6 +681,7 @@ static libp2p_security_err_t noise_secure_outbound(libp2p_security_t *self, libp
         }
         else if (action == NOISE_ACTION_READ_MESSAGE)
         {
+            uint8_t raw_prefix[4] = {0, 0, 0, 0};
             if (read_exact_deadline(raw, lenbuf, 2, deadline_ms) != 0)
             {
                 noise_handshakestate_free(hs);
@@ -700,6 +701,14 @@ static libp2p_security_err_t noise_secure_outbound(libp2p_security_t *self, libp
                 free(payload);
                 return LIBP2P_SECURITY_ERR_HANDSHAKE;
             }
+            if (l > 0)
+                raw_prefix[0] = buf[0];
+            if (l > 1)
+                raw_prefix[1] = buf[1];
+            if (l > 2)
+                raw_prefix[2] = buf[2];
+            if (l > 3)
+                raw_prefix[3] = buf[3];
             noise_buffer_set_input(mbuf, buf, l);
             uint8_t *pbuf_data = malloc(NOISE_MAX_PAYLOAD_LEN);
             if (!pbuf_data)
@@ -729,10 +738,14 @@ static libp2p_security_err_t noise_secure_outbound(libp2p_security_t *self, libp
             free(pbuf_data);
             if (err != NOISE_ERROR_NONE)
             {
-                NOISE_DIAG("outbound: read_message/verify failed err=%d read_idx=%u frame_len=%u frame_prefix=%02x%02x%02x%02x",
+                NOISE_DIAG("outbound: read_message/verify failed err=%d read_idx=%u frame_len=%u frame_prefix_raw=%02x%02x%02x%02x frame_prefix_post=%02x%02x%02x%02x",
                            err,
                            read_idx,
                            (unsigned)l,
+                           (unsigned)raw_prefix[0],
+                           (unsigned)raw_prefix[1],
+                           (unsigned)raw_prefix[2],
+                           (unsigned)raw_prefix[3],
                            (unsigned)(l > 0 ? buf[0] : 0),
                            (unsigned)(l > 1 ? buf[1] : 0),
                            (unsigned)(l > 2 ? buf[2] : 0),
