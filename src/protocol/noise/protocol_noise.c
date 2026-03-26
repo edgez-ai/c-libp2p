@@ -729,7 +729,14 @@ static libp2p_security_err_t noise_secure_outbound(libp2p_security_t *self, libp
             free(pbuf_data);
             if (err != NOISE_ERROR_NONE)
             {
-                NOISE_DIAG("outbound: read_message/verify failed err=%d read_idx=%u", err, read_idx);
+                NOISE_DIAG("outbound: read_message/verify failed err=%d read_idx=%u frame_len=%u frame_prefix=%02x%02x%02x%02x",
+                           err,
+                           read_idx,
+                           (unsigned)l,
+                           (unsigned)(l > 0 ? buf[0] : 0),
+                           (unsigned)(l > 1 ? buf[1] : 0),
+                           (unsigned)(l > 2 ? buf[2] : 0),
+                           (unsigned)(l > 3 ? buf[3] : 0));
                 noise_handshakestate_free(hs);
                 free(remote_ed);
                 free(remote_ext);
