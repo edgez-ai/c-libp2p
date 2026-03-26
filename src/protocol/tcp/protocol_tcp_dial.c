@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <net/if.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -87,6 +88,60 @@ static libp2p_transport_err_t configure_socket_options(int fd, tcp_transport_ctx
     }
 #endif
     return LIBP2P_TRANSPORT_OK;
+}
+
+static void apply_outbound_bind_preference(int fd, int family)
+{
+    const char *bind_iface = getenv("LIBP2P_BIND_IFACE");
+    if (bind_iface && bind_iface[0] != '\0')
+    {
+#ifdef SO_BINDTODEVICE
+        if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, bind_iface, (socklen_t)strlen(bind_iface)) != 0)
+        {
+            fprintf(stderr,
+                    "libp2p: tcp dial SO_BINDTODEVICE failed iface=%s errno=%d\n",
+                    bind_iface,
+                    errno);
+        }
+        else
+        {
+            fprintf(stdout, "libp2p: tcp dial bound to interface %s\n", bind_iface);
+        }
+#else
+        (void)family;
+        fprintf(stdout,
+                "libp2p: tcp dial interface bind requested (%s) but SO_BINDTODEVICE is unavailable on this platform\n",
+                bind_iface);
+#endif
+    }
+
+    const char *bind_ip = getenv("LIBP2P_BIND_IP");
+    if (!bind_ip || bind_ip[0] == '\0')
+    {
+        return;
+    }
+
+    if (family == AF_INET)
+    {
+        struct sockaddr_in local4;
+        memset(&local4, 0, sizeof(local4));
+        local4.sin_family = AF_INET;
+        local4.sin_port = htons(0);
+        if (inet_pton(AF_INET, bind_ip, &local4.sin_addr) == 1)
+        {
+            if (bind(fd, (const struct sockaddr *)&local4, sizeof(local4)) != 0)
+            {
+                fprintf(stderr,
+                        "libp2p: tcp dial bind source ip failed ip=%s errno=%d\n",
+                        bind_ip,
+                        errno);
+            }
+            else
+            {
+                fprintf(stdout, "libp2p: tcp dial using source ip %s\n", bind_ip);
+            }
+        }
+    }
 }
 
 /**
@@ -247,6 +302,8 @@ libp2p_transport_err_t tcp_dial(libp2p_transport_t *self, const multiaddr_t *add
         close(fd);
         return rc;
     }
+
+    apply_outbound_bind_preference(fd, ss.ss_family);
 
     int c = connect(fd, (struct sockaddr *)&ss, ss_len);
 #ifdef _WIN32
