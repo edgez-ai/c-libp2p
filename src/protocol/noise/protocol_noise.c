@@ -6,6 +6,7 @@
 #include <inttypes.h>
 #include <noise/protocol.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -19,6 +20,13 @@
 #define PEER_ID_ECDSA_KEY_TYPE 3
 #include "libp2p/crypto/ltc_compat.h"
 #include "libp2p/log.h"
+
+#define NOISE_DIAG(_fmt, ...)                        \
+    do                                               \
+    {                                                \
+        fprintf(stderr, "libp2p-noise: " _fmt "\n", ##__VA_ARGS__); \
+        LP_LOGE("NOISE", _fmt, ##__VA_ARGS__);      \
+    } while (0)
 
 peer_id_error_t peer_id_create_from_private_key_rsa(const uint8_t *key_data, size_t key_data_len, uint8_t **pubkey_buf, size_t *pubkey_len);
 peer_id_error_t peer_id_create_from_private_key_ecdsa(const uint8_t *key_data, size_t key_data_len, uint8_t **pubkey_buf, size_t *pubkey_len);
@@ -577,7 +585,7 @@ static libp2p_security_err_t noise_secure_outbound(libp2p_security_t *self, libp
     err = noise_handshakestate_new_by_name(&hs, "Noise_XX_25519_ChaChaPoly_SHA256", NOISE_ROLE_INITIATOR);
     if (err != NOISE_ERROR_NONE)
     {
-        LP_LOGE("NOISE", "outbound: handshakestate_new failed err=%d", err);
+        NOISE_DIAG("outbound: handshakestate_new failed err=%d", err);
         return LIBP2P_SECURITY_ERR_INTERNAL;
     }
 
@@ -590,7 +598,7 @@ static libp2p_security_err_t noise_secure_outbound(libp2p_security_t *self, libp
     err = noise_handshakestate_start(hs);
     if (err != NOISE_ERROR_NONE)
     {
-        LP_LOGE("NOISE", "outbound: handshakestate_start failed err=%d", err);
+        NOISE_DIAG("outbound: handshakestate_start failed err=%d", err);
         noise_handshakestate_free(hs);
         free(payload);
         return LIBP2P_SECURITY_ERR_HANDSHAKE;
@@ -629,7 +637,7 @@ static libp2p_security_err_t noise_secure_outbound(libp2p_security_t *self, libp
             msg_idx++;
             if (err != NOISE_ERROR_NONE)
             {
-                LP_LOGE("NOISE", "outbound: write_message failed err=%d msg_idx=%u", err, msg_idx);
+                NOISE_DIAG("outbound: write_message failed err=%d msg_idx=%u", err, msg_idx);
                 noise_handshakestate_free(hs);
                 free(payload);
                 return LIBP2P_SECURITY_ERR_HANDSHAKE;
@@ -721,7 +729,7 @@ static libp2p_security_err_t noise_secure_outbound(libp2p_security_t *self, libp
             free(pbuf_data);
             if (err != NOISE_ERROR_NONE)
             {
-                LP_LOGE("NOISE", "outbound: read_message/verify failed err=%d read_idx=%u", err, read_idx);
+                NOISE_DIAG("outbound: read_message/verify failed err=%d read_idx=%u", err, read_idx);
                 noise_handshakestate_free(hs);
                 free(remote_ed);
                 free(remote_ext);
@@ -746,7 +754,7 @@ static libp2p_security_err_t noise_secure_outbound(libp2p_security_t *self, libp
     err = noise_handshakestate_split(hs, &send_cs, &recv_cs);
     if (err != NOISE_ERROR_NONE)
     {
-        LP_LOGE("NOISE", "outbound: handshakestate_split failed err=%d", err);
+        NOISE_DIAG("outbound: handshakestate_split failed err=%d", err);
         noise_handshakestate_free(hs);
         free(payload);
         if (remote_peer && *remote_peer)
@@ -831,7 +839,7 @@ static libp2p_security_err_t noise_secure_inbound(libp2p_security_t *self, libp2
     err = noise_handshakestate_new_by_name(&hs, "Noise_XX_25519_ChaChaPoly_SHA256", NOISE_ROLE_RESPONDER);
     if (err != NOISE_ERROR_NONE)
     {
-        LP_LOGE("NOISE", "inbound: handshakestate_new failed err=%d", err);
+        NOISE_DIAG("inbound: handshakestate_new failed err=%d", err);
         return LIBP2P_SECURITY_ERR_INTERNAL;
     }
 
@@ -844,7 +852,7 @@ static libp2p_security_err_t noise_secure_inbound(libp2p_security_t *self, libp2
     err = noise_handshakestate_start(hs);
     if (err != NOISE_ERROR_NONE)
     {
-        LP_LOGE("NOISE", "inbound: handshakestate_start failed err=%d", err);
+        NOISE_DIAG("inbound: handshakestate_start failed err=%d", err);
         noise_handshakestate_free(hs);
         free(payload);
         return LIBP2P_SECURITY_ERR_HANDSHAKE;
@@ -883,7 +891,7 @@ static libp2p_security_err_t noise_secure_inbound(libp2p_security_t *self, libp2
             msg_idx++;
             if (err != NOISE_ERROR_NONE)
             {
-                LP_LOGE("NOISE", "inbound: write_message failed err=%d msg_idx=%u", err, msg_idx);
+                NOISE_DIAG("inbound: write_message failed err=%d msg_idx=%u", err, msg_idx);
                 noise_handshakestate_free(hs);
                 free(payload);
                 return LIBP2P_SECURITY_ERR_HANDSHAKE;
@@ -977,7 +985,7 @@ static libp2p_security_err_t noise_secure_inbound(libp2p_security_t *self, libp2
             free(pbuf_data);
             if (err != NOISE_ERROR_NONE)
             {
-                LP_LOGE("NOISE", "inbound: read_message/verify failed err=%d read_idx=%u", err, read_idx);
+                NOISE_DIAG("inbound: read_message/verify failed err=%d read_idx=%u", err, read_idx);
                 noise_handshakestate_free(hs);
                 free(remote_ed);
                 free(remote_ext);
@@ -1002,7 +1010,7 @@ static libp2p_security_err_t noise_secure_inbound(libp2p_security_t *self, libp2
     err = noise_handshakestate_split(hs, &send_cs, &recv_cs);
     if (err != NOISE_ERROR_NONE)
     {
-        LP_LOGE("NOISE", "inbound: handshakestate_split failed err=%d", err);
+        NOISE_DIAG("inbound: handshakestate_split failed err=%d", err);
         noise_handshakestate_free(hs);
         free(payload);
         if (remote_peer && *remote_peer)
