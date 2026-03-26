@@ -1042,6 +1042,13 @@ static int natpmp_delete_mapping(libp2p_nat_service_t *svc,
     return natpmp_add_mapping(svc, internal_port, 0, is_tcp, 0, NULL);
 }
 
+static uint16_t nat_random_ephemeral_port(void)
+{
+    uint32_t seed = (uint32_t)time(NULL) ^ (uint32_t)getpid() ^ (uint32_t)(uintptr_t)&seed;
+    uint32_t span = 65535u - 49152u + 1u;
+    return (uint16_t)(49152u + (rand_r(&seed) % span));
+}
+
 /* ======================= Refresh Thread ======================= */
 
 static void *nat_refresh_thread(void *arg)
@@ -1308,16 +1315,36 @@ int libp2p_nat_add_mapping(libp2p_nat_service_t *svc,
         }
     }
     
-    if (external_port == 0)
-        external_port = internal_port;
-    
     int ret;
     uint16_t assigned_port = external_port;
     
     if (svc->active_proto == LIBP2P_NAT_PROTO_UPNP && svc->upnp)
     {
-        ret = upnp_add_port_mapping(svc, internal_port, external_port,
-                                    is_tcp, svc->opts.mapping_lifetime_secs);
+        if (external_port == 0)
+        {
+            /* UPnP IGD v1 AddPortMapping requires an explicit external port.
+             * Generate a server-side random ephemeral port and retry a few times
+             * on collision to emulate "any" semantics. */
+            ret = LIBP2P_NAT_ERR_MAPPING_FAILED;
+            for (int i = 0; i < 16; i++)
+            {
+                uint16_t candidate = nat_random_ephemeral_port();
+                ret = upnp_add_port_mapping(svc, internal_port, candidate,
+                                            is_tcp, svc->opts.mapping_lifetime_secs);
+                if (ret == LIBP2P_NAT_OK)
+                {
+                    assigned_port = candidate;
+                    break;
+                }
+            }
+        }
+        else
+        {
+            ret = upnp_add_port_mapping(svc, internal_port, external_port,
+                                        is_tcp, svc->opts.mapping_lifetime_secs);
+            if (ret == LIBP2P_NAT_OK)
+                assigned_port = external_port;
+        }
     }
     else if (svc->active_proto == LIBP2P_NAT_PROTO_NATPMP && svc->natpmp)
     {

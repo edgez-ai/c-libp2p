@@ -1886,9 +1886,9 @@ int libp2p_host_start(libp2p_host_t *host)
                 /* Add NAT port mapping if NAT service is enabled */
                 if (host->nat_service)
                 {
-                    /* Hard-coded external port for UPnP/NAT-PMP */
-                    uint16_t requested_ext_port = 13485;
-                    LP_LOGI("NAT_PORT_MAP", "requesting external port %u via UPnP/NAT-PMP", requested_ext_port);
+                    /* Request dynamic external port (0 means any/auto-assigned) */
+                    uint16_t requested_ext_port = 0;
+                    LP_LOGI("NAT_PORT_MAP", "requesting dynamic external port via UPnP/NAT-PMP");
 
                     /* Extract port from the bound address string */
                     uint16_t port = 0;
