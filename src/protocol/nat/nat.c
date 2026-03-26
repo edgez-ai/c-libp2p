@@ -326,6 +326,7 @@ static int upnp_discover_gateway(libp2p_nat_service_t *svc, int timeout_ms)
     const char *preferred_ifaces[] = {
         "br-ahwlan",
         "phy0-sta0"
+        "eth1"
     };
     for (size_t i = 0; i < sizeof(preferred_ifaces) / sizeof(preferred_ifaces[0]); i++)
     {
