@@ -379,8 +379,9 @@ target_compile_definitions(libtomcrypt PRIVATE
     x25519_shared_secret=ltc_x25519_shared_secret
 )
 
-# Add noise-c submodule with crypto backends disabled.
-set(USE_LIBSODIUM OFF CACHE BOOL "" FORCE)
+# Add noise-c submodule and allow selecting libsodium backend for cross builds.
+option(LIBP2P_NOISE_USE_LIBSODIUM "Build noise-c with libsodium backend" OFF)
+set(USE_LIBSODIUM ${LIBP2P_NOISE_USE_LIBSODIUM} CACHE BOOL "" FORCE)
 set(USE_OPENSSL OFF CACHE BOOL "" FORCE)
 _add_subdirectory_no_tests(external/noise-c)
 set_target_properties(noiseprotocol PROPERTIES POSITION_INDEPENDENT_CODE ON)
