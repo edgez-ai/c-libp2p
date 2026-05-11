@@ -400,6 +400,7 @@ typedef struct
 {
     libp2p_stream_t *stream;
     int closed;
+    int owns_async_retain; /* 1 if this adapter holds an async retain on stream that must be released on free */
 } relay_stream_conn_t;
 
 static libp2p_conn_err_t map_stream_err(ssize_t v)
@@ -482,9 +483,19 @@ static void relay_conn_free(libp2p_conn_t *self)
     relay_stream_conn_t *ctx = self ? (relay_stream_conn_t *)self->ctx : NULL;
     if (ctx && ctx->stream)
     {
-        libp2p_stream_close(ctx->stream);
-        libp2p_stream_free(ctx->stream);
+        libp2p_stream_t *s = ctx->stream;
+        int owns = ctx->owns_async_retain;
         ctx->stream = NULL;
+        ctx->owns_async_retain = 0;
+        /* Close, but do NOT call libp2p_stream_free here: the stream object is
+         * owned by the protocol dispatcher (or the caller that allocated it).
+         * Calling stream_free here was the source of a use-after-free crash
+         * when this adapter outlived the original stream owner. Instead, if we
+         * took an async retain in relay_conn_from_stream, release it so the
+         * underlying stub can be destroyed when the last reference drops. */
+        (void)libp2p_stream_close(s);
+        if (owns)
+            (void)libp2p__stream_release_async(s);
     }
     free(ctx);
     free(self);
@@ -520,6 +531,13 @@ static libp2p_conn_t *relay_conn_from_stream(libp2p_stream_t *s)
         .get_fd = relay_conn_get_fd,
     };
     ctx->stream = s;
+    /* Take an extra async retain so the stream stub stays alive for the
+     * lifetime of this raw-conn adapter. Without this, the protocol
+     * dispatcher's libp2p_stream_free may destroy the stub while the upgraded
+     * session still references it via this adapter, leading to a UAF when the
+     * session later closes. */
+    if (libp2p__stream_retain_async(s))
+        ctx->owns_async_retain = 1;
     c->vt = &VTBL;
     c->ctx = ctx;
     return c;
