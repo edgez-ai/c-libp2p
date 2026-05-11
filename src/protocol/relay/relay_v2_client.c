@@ -930,3 +930,142 @@ int libp2p_relay_v2_build_circuit_addr(const char *relay_multiaddr, const peer_i
     *out_addr = buf;
     return 0;
 }
+
+/* ----------------------- HOP CONNECT (outbound circuit dial) ----------------------- */
+
+/* Encode HopMessage{type=CONNECT, peer=Peer{id=<target_multihash>}}. */
+static int encode_hop_connect(pb_buf_t *out, const peer_id_t *target)
+{
+    if (!out || !target || !target->bytes || target->size == 0)
+        return -1;
+
+    /* HopMessage.Type = CONNECT (field 1, varint, value 1) */
+    if (pb_buf_append_key(out, 1, 0) != 0)
+        return -1;
+    if (pb_buf_append_varint(out, 1) != 0)
+        return -1;
+
+    /* Build embedded Peer sub-message: field 1 = id (bytes) */
+    pb_buf_t peer = {0};
+    if (pb_buf_append_key(&peer, 1, 2) != 0)
+    {
+        free(peer.buf);
+        return -1;
+    }
+    if (pb_buf_append_bytes(&peer, target->bytes, target->size) != 0)
+    {
+        free(peer.buf);
+        return -1;
+    }
+
+    /* HopMessage.peer (field 2, length-delimited Peer sub-message) */
+    if (pb_buf_append_key(out, 2, 2) != 0)
+    {
+        free(peer.buf);
+        return -1;
+    }
+    if (pb_buf_append_bytes(out, peer.buf, peer.len) != 0)
+    {
+        free(peer.buf);
+        return -1;
+    }
+    free(peer.buf);
+    return 0;
+}
+
+/* Public: dial a target peer through a relay using HOP CONNECT.
+ *
+ * On success, returns a raw libp2p_conn_t wrapping the post-CONNECT stream.
+ * The caller is expected to feed this conn into the outbound upgrader
+ * (libp2p__host_upgrade_outbound) which will perform Noise + muxer negotiation
+ * directly with the target peer (the relay just forwards bytes).
+ */
+int libp2p_relay_v2_dial_connect(libp2p_host_t *host, const char *relay_multiaddr,
+                                 const peer_id_t *target, int timeout_ms,
+                                 libp2p_conn_t **out_conn)
+{
+    if (!host || !relay_multiaddr || !target || !out_conn)
+        return LIBP2P_ERR_NULL_PTR;
+    *out_conn = NULL;
+
+    libp2p_stream_t *s = NULL;
+    int rc = libp2p_host_dial_protocol_blocking(host, relay_multiaddr, LIBP2P_RELAY_V2_PROTO_HOP, timeout_ms, &s);
+    if (rc != 0 || !s)
+        return rc != 0 ? rc : LIBP2P_ERR_INTERNAL;
+
+    pb_buf_t msg = {0};
+    if (encode_hop_connect(&msg, target) != 0 || !msg.buf || !msg.len)
+    {
+        free(msg.buf);
+        libp2p_stream_close(s);
+        libp2p_stream_free(s);
+        return LIBP2P_ERR_INTERNAL;
+    }
+
+    libp2p_stream_set_deadline(s, RELAY_V2_HANDSHAKE_TIMEOUT_MS);
+    ssize_t sent = libp2p_lp_send(s, msg.buf, msg.len);
+    free(msg.buf);
+    if (sent < 0)
+    {
+        fprintf(stderr, "[RELAY CONNECT] lp_send failed rc=%zd\n", sent);
+        libp2p_stream_close(s);
+        libp2p_stream_free(s);
+        return LIBP2P_ERR_INTERNAL;
+    }
+
+    uint8_t buf[RELAY_V2_MAX_MSG_SIZE];
+    ssize_t n;
+    uint64_t deadline = now_mono_ms() + (uint64_t)RELAY_V2_HANDSHAKE_TIMEOUT_MS;
+    for (;;)
+    {
+        n = libp2p_lp_recv(s, buf, sizeof(buf));
+        if (n != LIBP2P_ERR_AGAIN)
+            break;
+        if (now_mono_ms() >= deadline)
+        {
+            n = LIBP2P_ERR_TIMEOUT;
+            break;
+        }
+        usleep(10000);
+    }
+    libp2p_stream_set_deadline(s, 0);
+    if (n <= 0)
+    {
+        fprintf(stderr, "[RELAY CONNECT] lp_recv failed n=%zd\n", n);
+        libp2p_stream_close(s);
+        libp2p_stream_free(s);
+        return (int)n < 0 ? (int)n : LIBP2P_ERR_EOF;
+    }
+
+    hop_msg_t hmsg;
+    if (parse_hop_message(buf, (size_t)n, &hmsg) != 0 || !hmsg.type_set || !hmsg.status_set || hmsg.type != 2)
+    {
+        fprintf(stderr, "[RELAY CONNECT] failed to parse hop response (n=%zd type_set=%d status_set=%d type=%llu)\n",
+                n, hmsg.type_set, hmsg.status_set, (unsigned long long)hmsg.type);
+        libp2p_stream_close(s);
+        libp2p_stream_free(s);
+        return LIBP2P_ERR_INTERNAL;
+    }
+
+    if (hmsg.status != LIBP2P_RELAY_V2_STATUS_OK)
+    {
+        fprintf(stderr, "[RELAY CONNECT] relay refused CONNECT: status=%llu\n",
+                (unsigned long long)hmsg.status);
+        libp2p_stream_close(s);
+        libp2p_stream_free(s);
+        return relay_status_to_err((libp2p_relay_v2_status_t)hmsg.status);
+    }
+
+    /* Wrap the post-CONNECT stream as a raw libp2p_conn_t for the upgrader. */
+    libp2p_conn_t *raw = relay_conn_from_stream(s);
+    if (!raw)
+    {
+        libp2p_stream_close(s);
+        libp2p_stream_free(s);
+        return LIBP2P_ERR_INTERNAL;
+    }
+    fprintf(stderr, "[RELAY CONNECT] HOP CONNECT OK via relay=%s; raw conn ready for upgrade\n",
+            relay_multiaddr);
+    *out_conn = raw;
+    return 0;
+}

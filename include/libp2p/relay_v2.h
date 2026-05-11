@@ -12,6 +12,11 @@ extern "C"
 {
 #endif
 
+/* Forward declaration: libp2p_conn_t is defined in <transport/connection.h>.
+ * Callers that use libp2p_relay_v2_dial_connect must include that header. */
+struct libp2p_connection;
+typedef struct libp2p_connection libp2p_conn_t;
+
 #define LIBP2P_RELAY_V2_PROTO_HOP  "/libp2p/circuit/relay/0.2.0/hop"
 #define LIBP2P_RELAY_V2_PROTO_STOP "/libp2p/circuit/relay/0.2.0/stop"
 
@@ -59,6 +64,26 @@ int libp2p_relay_v2_reserve_keep_stream(libp2p_host_t *host, const char *relay_m
  * Caller must free *out_addr with free().
  */
 int libp2p_relay_v2_build_circuit_addr(const char *relay_multiaddr, const peer_id_t *self, char **out_addr);
+
+/* Dial a target peer through a relay using HOP CONNECT (circuit-relay v2).
+ *
+ * Inputs:
+ *   host             - the libp2p host.
+ *   relay_multiaddr  - multiaddr of the relay node (no /p2p-circuit/ suffix),
+ *                      e.g. "/ip4/1.2.3.4/tcp/4001/p2p/<relay_peer_id>".
+ *   target           - peer id of the destination peer to reach via the relay.
+ *   timeout_ms       - overall timeout (ms) for dialing the relay HOP protocol.
+ *   out_conn         - on success, set to a newly allocated libp2p_conn_t
+ *                      wrapping the stream after HOP CONNECT succeeded.
+ *                      The caller transfers ownership into the upgrader
+ *                      (libp2p__host_upgrade_outbound) which performs Noise +
+ *                      muxer negotiation directly with the target peer.
+ *
+ * Returns 0 on success or a libp2p error code on failure.
+ */
+int libp2p_relay_v2_dial_connect(libp2p_host_t *host, const char *relay_multiaddr,
+                                 const peer_id_t *target, int timeout_ms,
+                                 libp2p_conn_t **out_conn);
 
 #ifdef __cplusplus
 }

@@ -32,6 +32,7 @@
 #include "libp2p/io.h"
 #include "libp2p/lpmsg.h"
 #include "libp2p/peerstore.h"
+#include "libp2p/relay_v2.h"
 #include "protocol/identify/protocol_identify.h"
 #include "protocol/tcp/protocol_tcp_util.h" /* now_mono_ms */
 #include "multiformats/multicodec/multicodec_codes.h"
@@ -1131,6 +1132,89 @@ static int do_dial_and_select(libp2p_host_t *host, const char *remote_multiaddr,
         multiaddr_free(addr);
         return LIBP2P_ERR_CANCELED;
     }
+
+    /* Circuit-relay v2 path: if the multiaddr contains "/p2p-circuit/", we must
+     * dial the relay over its transport, send a HOP CONNECT to the target,
+     * and use the resulting stream as our raw conn for the upgrade. The Noise
+     * handshake then runs end-to-end against the target peer through the
+     * relay (the relay just forwards bytes after STATUS=OK). */
+    {
+        const char *circuit_marker = strstr(remote_multiaddr, "/p2p-circuit");
+        if (circuit_marker)
+        {
+            /* Build relay-only multiaddr by stripping "/p2p-circuit/..." */
+            size_t relay_len = (size_t)(circuit_marker - remote_multiaddr);
+            char *relay_part = (char *)malloc(relay_len + 1);
+            if (!relay_part)
+            {
+                multiaddr_free(addr);
+                libp2p__emit_outgoing_error(host, LIBP2P_ERR_INTERNAL, "oom building relay addr");
+                return LIBP2P_ERR_INTERNAL;
+            }
+            memcpy(relay_part, remote_multiaddr, relay_len);
+            relay_part[relay_len] = '\0';
+
+            /* Parse target peer id from the segment after /p2p-circuit. */
+            const char *after = circuit_marker + strlen("/p2p-circuit");
+            const char *q = strstr(after, "/p2p/");
+            size_t qskip = 5;
+            if (!q)
+            {
+                q = strstr(after, "/ipfs/");
+                qskip = 6;
+            }
+            if (!q)
+            {
+                free(relay_part);
+                multiaddr_free(addr);
+                libp2p__emit_outgoing_error(host, LIBP2P_ERR_UNSUPPORTED, "circuit addr missing target peer");
+                return LIBP2P_ERR_UNSUPPORTED;
+            }
+            q += qskip;
+            const char *qend = strchr(q, '/');
+            size_t tlen = qend ? (size_t)(qend - q) : strlen(q);
+            if (tlen == 0 || tlen >= 128)
+            {
+                free(relay_part);
+                multiaddr_free(addr);
+                libp2p__emit_outgoing_error(host, LIBP2P_ERR_UNSUPPORTED, "circuit addr: bad target peer");
+                return LIBP2P_ERR_UNSUPPORTED;
+            }
+            char tps[128];
+            memcpy(tps, q, tlen);
+            tps[tlen] = '\0';
+
+            peer_id_t target = {0};
+            if (peer_id_create_from_string(tps, &target) != PEER_ID_SUCCESS)
+            {
+                free(relay_part);
+                multiaddr_free(addr);
+                libp2p__emit_outgoing_error(host, LIBP2P_ERR_UNSUPPORTED, "circuit addr: invalid target peer id");
+                return LIBP2P_ERR_UNSUPPORTED;
+            }
+
+            fprintf(stderr, "[CIRCUIT DIAL] relay=%s target=%s\n", relay_part, tps);
+            libp2p_conn_t *circuit_raw = NULL;
+            int crc = libp2p_relay_v2_dial_connect(host, relay_part, &target, dial_timeout_ms, &circuit_raw);
+            free(relay_part);
+            peer_id_destroy(&target);
+            if (crc != 0 || !circuit_raw)
+            {
+                multiaddr_free(addr);
+                libp2p__emit_outgoing_error(host, crc ? crc : LIBP2P_ERR_INTERNAL, "circuit HOP CONNECT failed");
+                return crc ? crc : LIBP2P_ERR_INTERNAL;
+            }
+            /* Skip the transport dial: the upgrader will run on circuit_raw. */
+            raw = circuit_raw;
+            multiaddr_free(addr);
+            addr = NULL;
+            is_quic = 0;
+            /* Fall through to the upgrade block below (after the transport dial,
+             * which we now bypass). Mark this with a goto to that point. */
+            goto post_transport_dial;
+        }
+    }
+
     libp2p_transport_t *t = libp2p__host_select_transport(host, addr);
     libp2p_transport_err_t d_rc = t ? libp2p_transport_dial(t, addr, &raw) : LIBP2P_TRANSPORT_ERR_UNSUPPORTED;
     if (d_rc != LIBP2P_TRANSPORT_OK || !raw)
@@ -1142,6 +1226,7 @@ static int do_dial_and_select(libp2p_host_t *host, const char *remote_multiaddr,
     }
     multiaddr_free(addr);
 
+post_transport_dial:
     /* QUIC: bypass upgrader; stream support comes in Phase 2. */
     if (is_quic)
     {
