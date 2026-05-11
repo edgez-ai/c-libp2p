@@ -980,6 +980,9 @@ static void *dcutr_server_worker(void *arg)
         libp2p_conn_t *raw = make_tcp_conn(success_fd);
         if (raw && host)
         {
+            /* Ownership of raw is transferred to accept_inbound_raw unconditionally:
+             * on success the host owns it; on failure the upgrade helper has already
+             * freed raw via libp2p_conn_free. Do NOT free raw here or it is a double-free. */
             int accept_rc = libp2p__host_accept_inbound_raw(host, raw);
             if (accept_rc == 0)
             {
@@ -987,8 +990,7 @@ static void *dcutr_server_worker(void *arg)
             }
             else
             {
-                fprintf(stderr, "[DCUTR] failed to hand off connection (rc=%d)\n", accept_rc);
-                libp2p_conn_free(raw);
+                fprintf(stderr, "[DCUTR] failed to hand off connection (rc=%d) (raw already freed by upgrade helper)\n", accept_rc);
             }
         }
         else
@@ -1588,6 +1590,9 @@ int libp2p_dcutr_upgrade(libp2p_dcutr_service_t *svc, const peer_id_t *peer, int
         libp2p_conn_t *raw = make_tcp_conn(success_fd);
         if (raw && svc->host)
         {
+            /* Ownership of raw is transferred to accept_inbound_raw unconditionally:
+             * on success the host owns it; on failure the upgrade helper has already
+             * freed raw via libp2p_conn_free. Do NOT free raw here or it is a double-free. */
             int accept_rc = libp2p__host_accept_inbound_raw(svc->host, raw);
             if (accept_rc == 0)
             {
@@ -1595,8 +1600,7 @@ int libp2p_dcutr_upgrade(libp2p_dcutr_service_t *svc, const peer_id_t *peer, int
             }
             else
             {
-                fprintf(stderr, "[DCUTR] failed to hand off connection (rc=%d)\n", accept_rc);
-                libp2p_conn_free(raw);
+                fprintf(stderr, "[DCUTR] failed to hand off connection (rc=%d) (raw already freed by upgrade helper)\n", accept_rc);
             }
         }
         else

@@ -663,12 +663,14 @@ static void *relay_stop_worker(void *arg)
         return NULL;
     }
 
+    /* Ownership of raw transfers to accept_inbound_raw unconditionally:
+     * on success the host owns it; on failure the upgrade helper has already
+     * freed raw via libp2p_conn_free. Do NOT free raw here or it is a double-free. */
     int rc = libp2p__host_accept_inbound_raw(host, raw);
     if (rc != 0)
     {
         if (initiator_peer)
             peer_id_destroy(initiator_peer);
-        libp2p_conn_free(raw);
         libp2p__stream_release_async(s);
         if (host)
             libp2p__worker_dec(host);
