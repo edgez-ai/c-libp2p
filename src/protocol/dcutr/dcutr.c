@@ -430,6 +430,93 @@ static int parse_multiaddr_for_tcp(const char *addr_str, char *ip_out, size_t ip
     return is_ipv6 ? 6 : 4;
 }
 
+/* Filter DCUtR remote addresses received in a CONNECT message.
+ *
+ * Removes addresses that cannot or must not be hole-punch targets:
+ *   - circuit-relay addresses (/p2p-circuit)
+ *   - loopback (/ip4/127.0.0.0/8, /ip6/::1)
+ *   - addresses whose IP equals the relay's IP (extracted from the DCUtR
+ *     stream's remote multiaddr). Some peers mistakenly advertise the relay's
+ *     own listen address as one of their observed addresses (e.g. when their
+ *     NAT external IP coincides with the relay or when Identify echoes the
+ *     relay's address back to them). Hole-punching to the relay would just
+ *     reopen a TCP connection to the relay itself and then fail Noise.
+ *
+ * Operates in-place: frees rejected entries and compacts the array. Updates
+ * *count. Always succeeds.
+ */
+static void filter_dcutr_remote_addrs(char **addrs, size_t *count, libp2p_stream_t *s)
+{
+    if (!addrs || !count || *count == 0)
+        return;
+
+    /* Extract the relay's IP and port from the DCUtR stream's remote multiaddr.
+     * For a relay-routed stream this looks like:
+     *   /ip4/<relay>/tcp/<port>/p2p/<relay_id>/p2p-circuit/p2p/<peer_id>
+     * parse_multiaddr_for_tcp() picks up the leading /ip4/.../tcp/... prefix. */
+    char relay_ip[64] = {0};
+    int relay_port = 0;
+    int relay_ipver = 0;
+    if (s)
+    {
+        const char *rstr = libp2p_stream_remote_addr_str(s);
+        if (rstr)
+            relay_ipver = parse_multiaddr_for_tcp(rstr, relay_ip, sizeof(relay_ip), &relay_port);
+    }
+
+    size_t kept = 0;
+    for (size_t i = 0; i < *count; i++)
+    {
+        char *a = addrs[i];
+        if (!a)
+            continue;
+
+        int drop = 0;
+        const char *reason = NULL;
+
+        if (strstr(a, "/p2p-circuit") != NULL)
+        {
+            drop = 1;
+            reason = "relay circuit";
+        }
+        else if (strncmp(a, "/ip4/127.", 9) == 0 ||
+                 strncmp(a, "/ip6/::1/", 9) == 0 ||
+                 strncmp(a, "/ip6/::1", 8) == 0)
+        {
+            drop = 1;
+            reason = "loopback";
+        }
+        else if (relay_ipver > 0 && relay_ip[0])
+        {
+            char a_ip[64] = {0};
+            int a_port = 0;
+            int a_ipver = parse_multiaddr_for_tcp(a, a_ip, sizeof(a_ip), &a_port);
+            if (a_ipver == relay_ipver && strcmp(a_ip, relay_ip) == 0)
+            {
+                drop = 1;
+                reason = "matches relay IP";
+            }
+        }
+
+        if (drop)
+        {
+            fprintf(stderr, "[DCUTR] filtering remote addr %s (%s)\n", a, reason ? reason : "rejected");
+            free(a);
+            addrs[i] = NULL;
+        }
+        else
+        {
+            if (kept != i)
+            {
+                addrs[kept] = a;
+                addrs[i] = NULL;
+            }
+            kept++;
+        }
+    }
+    *count = kept;
+}
+
 /* ----------------------- hole punching ----------------------- */
 
 typedef struct
@@ -960,6 +1047,19 @@ static void *dcutr_server_worker(void *arg)
     dcutr_message_free(&sync_msg);
 
     fprintf(stderr, "[DCUTR] received SYNC, starting hole punch\n");
+
+    /* Filter out non-dialable / relay-IP entries from the peer's claimed addrs */
+    filter_dcutr_remote_addrs(remote_addrs, &num_remote_addrs, s);
+    if (num_remote_addrs == 0)
+    {
+        fprintf(stderr, "[DCUTR] no usable remote addresses after filtering, aborting hole punch\n");
+        free_addr_array(remote_addrs, num_remote_addrs);
+        libp2p_stream_close(s);
+        libp2p__stream_release_async(s);
+        if (host)
+            libp2p__worker_dec(host);
+        return NULL;
+    }
 
     /* Attempt hole punch */
     char *success_addr = NULL;
@@ -1570,6 +1670,17 @@ int libp2p_dcutr_upgrade(libp2p_dcutr_service_t *svc, const peer_id_t *peer, int
     free(sync.buf);
 
     fprintf(stderr, "[DCUTR] sent SYNC, starting hole punch\n");
+
+    /* Filter out non-dialable / relay-IP entries from the peer's claimed addrs */
+    filter_dcutr_remote_addrs(remote_addrs, &num_remote_addrs, s);
+    if (num_remote_addrs == 0)
+    {
+        fprintf(stderr, "[DCUTR] no usable remote addresses after filtering, aborting hole punch\n");
+        free_addr_array(remote_addrs, num_remote_addrs);
+        libp2p_stream_close(s);
+        libp2p_stream_free(s);
+        return LIBP2P_ERR_INTERNAL;
+    }
 
     /* Attempt hole punch */
     char *success_addr = NULL;
