@@ -1111,7 +1111,7 @@ add_module(
     src/peer_id
 )
 target_link_libraries(peer_id_ed25519 PRIVATE
-    libtomcrypt peer_id_proto
+    eddsa libtomcrypt peer_id_proto
 )
 
 # ---------------------------------------------

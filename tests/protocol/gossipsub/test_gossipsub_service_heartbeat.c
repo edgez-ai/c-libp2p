@@ -5,6 +5,7 @@
 /* Test-only forward declaration (header isn't on the public include path for this target). */
 struct libp2p_stream;
 void gossipsub_on_stream_open(struct libp2p_stream *s, void *user_data);
+void gossipsub_on_stream_close(struct libp2p_stream *s, void *user_data);
 
 typedef struct gossipsub_test_closed_stream_ctx
 {
