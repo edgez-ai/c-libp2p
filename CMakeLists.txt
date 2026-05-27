@@ -117,6 +117,7 @@ option(ENABLE_CPPCHECK   "Run cppcheck static analysis"  OFF)
 option(ENABLE_IWYU       "Run include‑what‑you‑use"      OFF)
 option(ENABLE_COVERAGE   "Enable code-coverage flags"    ON)
 option(ENABLE_STRESS_TESTS "Build and run high‑load stress tests" OFF)
+option(LIBP2P_ENABLE_QUIC "Build QUIC transport and link it into libp2p_unified" ON)
 
 if(ENABLE_SANITIZERS)
     set(_sanitizers ${SANITIZERS})
@@ -1398,6 +1399,7 @@ set_tests_properties(Testgossipsub_validation PROPERTIES TIMEOUT 10)
 # ---------------------------------------------
 # protocol/quic (skeleton)
 # ---------------------------------------------
+if(LIBP2P_ENABLE_QUIC)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 add_library(protocol_quic STATIC
     src/protocol/quic/protocol_quic.c
@@ -1467,6 +1469,7 @@ set_target_properties(test_quic_stream_loopback PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
 add_test(NAME Testquic_stream_loopback COMMAND test_quic_stream_loopback)
 set_tests_properties(Testquic_stream_loopback PROPERTIES TIMEOUT 20)
+endif()
 # ---------------------------------------------
 # protocol/muxer/mplex
 # ---------------------------------------------
